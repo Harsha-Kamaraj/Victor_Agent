@@ -1,0 +1,33 @@
+# --- secrets ---
+.env
+.env.local
+*.pem
+*.key
+
+# --- python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- victor runtime artifacts ---
+logs/
+*.jsonl
+.victor/
+models/            # piper voice + fastembed onnx downloads
+index/             # faiss index + sqlite sidecar
+screenshots/
+
+# --- os / editor ---
+Thumbs.db
+desktop.ini
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/settings.json
