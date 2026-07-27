@@ -53,12 +53,21 @@ The whole stack is ONNX or native C — no torch, no CUDA, no GPU required.
 
 ## Roadmap
 
-- [ ] **Day 1** — Foundation, quota ledger, session tracing, voice spine (mic → VAD → STT → TTS)
-- [ ] **Day 2** — ReAct agent core, shell tools, HITL safety interceptor
-- [ ] **Day 3** — Kill switch, reversible action journal + undo, UIA tree reader
-- [ ] **Day 4** — Desktop control end to end, vision fallback
-- [ ] **Day 5** — RAG memory, `victor scout` portfolio analysis
-- [ ] **Day 6** — HUD, benchmarks, tests, demo
+Phases are units of execution and integration, not a calendar. Each has an exit gate it
+must pass before the next one starts — a box gets ticked only when that gate is green.
+
+- [ ] **P0 · Skeleton & Plumbing** — config, quota ledger, provider router, session tracing, CLI
+- [ ] **P1 · Voice I/O** — mic → VAD → STT → TTS, push-to-talk, latency benchmarks
+- [ ] **P2 · Agent Core** — ReAct loop, tool registry, shell and git tools
+- [ ] **P3 · Safety & Reversibility** — interceptor, dry-run, kill switch, action journal + undo
+- [ ] **P4 · Screen Perception** — UIA tree reader, screen capture, vision fallback *(parallelizable)*
+- [ ] **P5 · Desktop Actuation** — UIA-driven clicks and typing, gated by P3, using P4
+- [ ] **P6 · Memory** — FAISS + fastembed, auto-captured error/fix pairs, recall injection
+- [ ] **P7 · Scout** — GitHub portfolio gap analysis, reusing P6's embedding stack
+- [ ] **P8 · Surface & Ship** — HUD, benchmarks, tests, demo
+
+Dependencies: `P0 → P1 → P2 → P3 → P5 → P6 → P7 → P8`, with **P4 branching off P0** and
+merging into P5. P4 is read-only, so it's the one phase that can be built out of order.
 
 ---
 
