@@ -36,6 +36,25 @@ user what you wanted to run and let them do it.
 the same failing call.\
 """
 
+DESKTOP_HINT = """\
+You can also see and drive the screen. How to do it well:
+
+- Call screen_read before you click, and again after anything that changed the \
+screen. It is free and instant - the operating system already knows what is \
+there. Never click an index you have not just read.
+- Pass the element's label to click along with its index. Victor re-reads the \
+screen and refuses the click if the index has moved, which is how you avoid \
+clicking the wrong thing. If it tells you the index moved, read the screen \
+again rather than retrying the same number.
+- Prefer type_text with an index over clicking a field and then typing.
+- If what you want is not listed, scroll and read again. A window's tree is \
+only walked so far.
+- Use press_keys for shortcuts, and write mod for the platform's shortcut key, \
+so mod+s saves everywhere.
+- To run a command, use the shell tool. Typing into a terminal window is \
+refused, because commands you type there are not checked by anything.\
+"""
+
 VOICE_HINT = (
     "The user is speaking to you, so their words came through speech recognition "
     "and may contain transcription errors. Prefer the most plausible technical "
@@ -50,14 +69,23 @@ STT_PROMPT = (
 )
 
 
-def system_prompt(environment: dict[str, Any], *, voice: bool = False) -> str:
-    """Build the system message for a run."""
+def system_prompt(
+    environment: dict[str, Any], *, voice: bool = False, desktop: bool = False
+) -> str:
+    """Build the system message for a run.
+
+    The desktop section is added only when the desktop tools are registered.
+    Describing capabilities the model does not have is how a run ends with the
+    agent apologising for not being able to click something nobody asked it to.
+    """
     text = SYSTEM.format(
         platform=f"{environment.get('platform', 'unknown')} "
         f"{environment.get('release', '')}".strip(),
         cwd=environment.get("cwd", "an unknown directory"),
         shell=environment.get("shell", "a shell"),
     )
+    if desktop:
+        text = f"{text}\n\n{DESKTOP_HINT}"
     if voice:
         text = f"{text}\n\n{VOICE_HINT}"
     return text

@@ -126,7 +126,13 @@ class Agent:
         self.messages = [
             {
                 "role": "system",
-                "content": system_prompt(describe_environment(self.cwd), voice=self.voice),
+                "content": system_prompt(
+                    describe_environment(self.cwd),
+                    voice=self.voice,
+                    # Ask the registry rather than a flag: the prompt then
+                    # cannot drift out of step with what was actually wired in.
+                    desktop="click" in self.registry,
+                ),
             }
         ]
 
@@ -275,6 +281,8 @@ def build_agent(
     registry: ToolRegistry | None = None,
     kill_switch: Any | None = None,
     confirmer: Any | None = None,
+    desktop: bool | None = None,
+    app: str | None = None,
 ) -> Agent:
     """Wire an agent with the standard router, tools, client and safety layer."""
     from ..safety import (
@@ -310,6 +318,8 @@ def build_agent(
             interceptor=interceptor,
             kill_switch=kill_switch,
             trash=trash,
+            desktop=desktop,
+            app=app,
         )
 
     return Agent(

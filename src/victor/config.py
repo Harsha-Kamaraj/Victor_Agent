@@ -55,6 +55,15 @@ class Settings(BaseSettings):
     strict_free_tier: bool = Field(
         default=True, validation_alias=_env("VICTOR_STRICT_FREE_TIER")
     )
+    #: Whether the agent may drive the mouse and keyboard.
+    #:
+    #: Off by default, and deliberately so. Every other tool acts inside a
+    #: directory Victor was pointed at; these act on whatever window happens to
+    #: be in front, including one the user is typing into. That is a different
+    #: kind of permission, and it should be asked for rather than assumed.
+    desktop_control: bool = Field(
+        default=False, validation_alias=_env("VICTOR_DESKTOP_CONTROL")
+    )
 
     # --- model overrides --------------------------------------------------
     text_model: str | None = Field(default=None, validation_alias=_env("VICTOR_TEXT_MODEL"))

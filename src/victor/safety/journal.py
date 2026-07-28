@@ -289,8 +289,19 @@ def plan_undo(
             "",
         )
 
-    if tool == "read_file":
+    if tool in {"read_file", "screen_read", "scroll"}:
         return None, "reading changes nothing"
+
+    if tool in {"click", "type_text", "press_keys", "open_app"}:
+        # There is no inverse for a click, and inventing one would be the exact
+        # dishonesty this module's docstring warns about: "undo" that re-clicks
+        # something is a second action, not a reversal. The application on the
+        # other side has its own undo, and it is the only thing that knows what
+        # the click meant.
+        return None, (
+            "a click cannot be un-clicked. If the application has an undo, "
+            "press mod+z in it"
+        )
 
     if tool == "git":
         subcommand = str(arguments.get("subcommand", ""))

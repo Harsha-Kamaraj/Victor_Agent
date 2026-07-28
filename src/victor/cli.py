@@ -427,6 +427,14 @@ def do_task(
         bool,
         typer.Option("--yes", help="Approve every action without asking. Use with care."),
     ] = False,
+    desktop: Annotated[
+        bool,
+        typer.Option("--desktop", help="Let the agent click and type on screen."),
+    ] = False,
+    app_name: Annotated[
+        str | None,
+        typer.Option("--app", help="Point the desktop tools at one application."),
+    ] = None,
 ) -> None:
     """Run one task through the agent and print the answer."""
     from .agent import build_agent
@@ -446,6 +454,8 @@ def do_task(
             max_steps=steps,
             kill_switch=switch,
             confirmer=AutoConfirmer(True) if yes else None,
+            desktop=desktop or None,
+            app=app_name,
         )
         if show_steps:
             agent.on_step = _render_step
@@ -458,6 +468,11 @@ def do_task(
                 console.print(
                     "[yellow]--yes:[/yellow] every action is pre-approved. "
                     "Irreversible commands are still refused."
+                )
+            if desktop:
+                console.print(
+                    "[yellow]--desktop:[/yellow] the agent can click and type on "
+                    "your screen. Ctrl-C stops it mid-click."
                 )
             console.print("[dim]Ctrl-C stops the run.[/dim]")
             result = agent.run(task)
@@ -880,6 +895,135 @@ def uia(
         console.print(
             "[yellow]the walk hit its limit[/yellow] - raise --limit or narrow the window"
         )
+
+
+# --- desktop actuation ----------------------------------------------------
+
+
+def _open_desktop(app_name: str | None):
+    """A ready-to-use desktop, or a printed reason and a non-zero exit."""
+    from .desktop import Desktop
+
+    desktop = Desktop(app=app_name)
+    ok, detail = desktop.available()
+    if not ok:
+        err_console.print(f"[yellow]desktop control unavailable:[/yellow] {detail}")
+        raise typer.Exit(5)
+    return desktop
+
+
+@app.command()
+def click(
+    target: Annotated[
+        str | None,
+        typer.Argument(help="Part of the element's label. Omit if you pass --index."),
+    ] = None,
+    index: Annotated[
+        int | None, typer.Option("--index", "-i", help="Click this element index instead.")
+    ] = None,
+    app_name: Annotated[
+        str | None, typer.Option("--app", help="Target an application by name.")
+    ] = None,
+    right: Annotated[bool, typer.Option("--right", help="Right-click.")] = False,
+    double: Annotated[bool, typer.Option("--double", help="Double-click.")] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Say what would be clicked, and stop.")
+    ] = False,
+) -> None:
+    """Click one control, by label or index. Zero API calls.
+
+    The manual counterpart to ``victor uia``: that one proves Victor can see a
+    window, this one proves it can act on what it saw, and neither sends
+    anything anywhere. Between them they are the whole perception-actuation
+    loop with the model taken out, which is what makes them the right thing to
+    run when checking Victor on a new machine.
+    """
+    desktop = _open_desktop(app_name)
+
+    if index is None and not target:
+        err_console.print("[yellow]name part of a label, or pass --index[/yellow]")
+        raise typer.Exit(2)
+
+    snapshot = desktop.snapshot(refresh=True)
+    if index is None:
+        matches = [e for e in snapshot.find(str(target)) if e.actionable]
+        if not matches:
+            err_console.print(f"[yellow]nothing clickable matches {target!r}[/yellow]")
+            console.print(f"[dim]{len(snapshot)} elements in {snapshot.window_title}[/dim]")
+            raise typer.Exit(1)
+        if len(matches) > 1:
+            # Refusing to pick is the same rule the agent path follows: an
+            # ambiguous target is a question, not a coin toss.
+            console.print(f"[yellow]{len(matches)} elements match {target!r}:[/yellow]")
+            for element in matches[:10]:
+                console.print(f"  {element.render()}")
+            console.print("\n[dim]pick one with --index[/dim]")
+            raise typer.Exit(1)
+        chosen = matches[0]
+    else:
+        chosen = snapshot.by_index(index)
+        if chosen is None:
+            err_console.print(f"[yellow]there is no element {index}[/yellow]")
+            raise typer.Exit(1)
+
+    console.print(f"[dim]{snapshot.window_title}[/dim]")
+    console.print(f"  {chosen.render()}")
+
+    if dry_run:
+        console.print("[yellow]dry run:[/yellow] nothing was clicked")
+        return
+
+    result = desktop.click(
+        chosen.index, chosen.label, button="right" if right else "left", double=double
+    )
+    if not result.ok:
+        err_console.print(f"[red]{result.detail}[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]{result.detail}[/green] [dim]via {result.method}[/dim]")
+    if result.window:
+        console.print(f"[dim]now showing: {result.window} ({result.element_count} elements)[/dim]")
+
+
+@app.command()
+def press(
+    keys: Annotated[str, typer.Argument(help="A chord, e.g. 'mod+s' or 'mod+a delete'.")],
+    app_name: Annotated[
+        str | None, typer.Option("--app", help="Focus this application first.")
+    ] = None,
+    show: Annotated[
+        bool, typer.Option("--vocabulary", help="List the key names that work on both platforms.")
+    ] = False,
+) -> None:
+    """Press a keyboard shortcut. ``mod`` is Ctrl on Windows and Command on macOS."""
+    from .desktop.keys import UnknownKey, known_keys, parse_sequence
+
+    if show:
+        console.print(", ".join(known_keys()))
+        console.print(
+            "\n[dim]modifiers: ctrl, alt/option, shift, cmd/win - and mod, which is "
+            "whichever of ctrl and cmd this platform uses for shortcuts[/dim]"
+        )
+        return
+
+    try:
+        chords = parse_sequence(keys)
+    except UnknownKey as exc:
+        err_console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(2) from exc
+
+    desktop = _open_desktop(app_name)
+    if app_name:
+        focused = desktop.focus_app(app_name)
+        if not focused.ok:
+            err_console.print(f"[yellow]{focused.detail}[/yellow]")
+            raise typer.Exit(1)
+
+    console.print(f"[dim]pressing {' then '.join(str(c) for c in chords)}[/dim]")
+    result = desktop.press_keys(keys)
+    if not result.ok:
+        err_console.print(f"[red]{result.detail}[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]{result.detail}[/green]")
 
 
 @app.command()

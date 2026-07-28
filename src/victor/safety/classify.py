@@ -315,6 +315,84 @@ def _classify_git_push(args: list[str], segment: str) -> Classification:
     )
 
 
+#: Button labels that name a consequential act rather than a navigation.
+#:
+#: Clicking is normally free - moving through a user interface is how you find
+#: out what is there, and confirming every click would be the alarm fatigue this
+#: module's docstring warns about. But a handful of buttons do something a user
+#: would want to be asked about first, and they are recognisable by their label,
+#: because interfaces are designed so a *person* can recognise them.
+#:
+#: Written as whole words on purpose: ``\bdelete\b`` matches the "Delete" button
+#: and not the "Deleted Items" folder, and ``\bsend\b`` matches "Send" and not
+#: "Sent Mail". Navigating to a folder full of deleted things is not a delete.
+_CONSEQUENTIAL_LABEL = re.compile(
+    r"\b("
+    r"delete|remove|erase|uninstall|discard|revoke|deactivate|"
+    r"send|submit|publish|post|share|"
+    r"buy|purchase|pay|checkout|order|subscribe|"
+    r"format|reset|restore\s+defaults|factory\s+reset|"
+    r"shut\s*down|restart|log\s*out|sign\s*out|"
+    r"empty\s+(the\s+)?(trash|bin)|move\s+to\s+(the\s+)?(trash|bin)|"
+    r"don'?t\s+save|overwrite|replace"
+    r")\b",
+    re.I,
+)
+
+
+def classify_click(arguments: dict) -> Classification:
+    """Classify a click by what its label says it does."""
+    label = str(arguments.get("label", "")).strip()
+    index = arguments.get("index")
+    target = f"element {index} ({label!r})" if label else f"element {index}"
+
+    match = _CONSEQUENTIAL_LABEL.search(label)
+    if match:
+        return Classification(
+            Risk.CONFIRM,
+            f"clicking {label!r} - {match.group(0).lower()} is not something I can undo",
+            target,
+        )
+    if str(arguments.get("button", "")) == "right":
+        # A context menu is a read, not an act. What gets picked *from* it comes
+        # back through this classifier as its own click.
+        return Classification(Risk.SAFE, "opens a context menu")
+    return Classification(Risk.SAFE, f"clicking {label or target} navigates the interface")
+
+
+def classify_keys(arguments: dict) -> Classification:
+    """Classify a shortcut by whether it discards something."""
+    from ..desktop.keys import UnknownKey, parse_sequence
+
+    raw = str(arguments.get("keys", ""))
+    try:
+        chords = parse_sequence(raw)
+    except UnknownKey as exc:
+        return Classification(Risk.CONFIRM, f"could not read the shortcut: {exc}", raw)
+
+    for chord in chords:
+        if chord.destructive_hint:
+            return Classification(
+                Risk.CONFIRM, f"{chord} deletes without going through the trash", raw
+            )
+    return Classification(Risk.SAFE, f"{raw} is an ordinary shortcut")
+
+
+def classify_open_app(arguments: dict) -> Classification:
+    """Opening an application is routine; opening a terminal is a shell."""
+    from ..tools.desktop import TERMINAL_APPS
+
+    name = str(arguments.get("name", "")).strip()
+    if name.lower().removesuffix(".exe") in TERMINAL_APPS:
+        return Classification(
+            Risk.CONFIRM,
+            f"{name} is a command line. Anything run there bypasses the checks "
+            "that shell commands go through",
+            name,
+        )
+    return Classification(Risk.SAFE, f"opening {name} starts an application")
+
+
 def classify_git(subcommand: str, args: list[str] | None = None) -> Classification:
     """Classify a call to the structured git tool."""
     sub = subcommand.strip()
@@ -341,6 +419,23 @@ def classify(tool_name: str, arguments: dict, *, mutating: bool) -> Classificati
         )
     if tool_name == "read_file":
         return Classification(Risk.SAFE, "reads a file")
+    if tool_name == "click":
+        return classify_click(arguments)
+    if tool_name == "press_keys":
+        return classify_keys(arguments)
+    if tool_name == "open_app":
+        return classify_open_app(arguments)
+    if tool_name == "type_text":
+        # Typing is reversible - select all, delete - and the thing that makes
+        # it consequential is the button pressed afterwards, which arrives here
+        # as its own call. Submitting is the exception: return is the button.
+        if arguments.get("submit"):
+            return Classification(
+                Risk.SAFE, "types and presses return, which the target may act on"
+            )
+        return Classification(Risk.SAFE, "types into a field")
+    if tool_name in {"screen_read", "scroll"}:
+        return Classification(Risk.SAFE, "reads the screen")
     if mutating:
         return Classification(Risk.CONFIRM, f"{tool_name} is declared as mutating")
     return Classification(Risk.SAFE, f"{tool_name} does not modify anything")

@@ -53,6 +53,8 @@ def build_registry(
     shell: bool = True,
     kill_switch: object | None = None,
     trash: object | None = None,
+    desktop: bool | None = None,
+    app: str | None = None,
 ) -> ToolRegistry:
     """The standard tool set, gated by the safety interceptor.
 
@@ -75,4 +77,14 @@ def build_registry(
         registry.register(ShellTool(cwd=workdir, kill_switch=kill_switch, trash=trash))
     registry.register(ReadFileTool(cwd=workdir))
     registry.register(GitTool(cwd=workdir))
+
+    # Desktop control is opt-in: see Settings.desktop_control. Registering the
+    # tools is what makes them visible to the model, so a run without the flag
+    # cannot click anything even by accident - the capability is absent rather
+    # than merely discouraged.
+    if desktop if desktop is not None else settings.desktop_control:
+        from .desktop import build_desktop_tools
+
+        for tool in build_desktop_tools(kill_switch=kill_switch, app=app):
+            registry.register(tool)
     return registry
