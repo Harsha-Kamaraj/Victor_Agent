@@ -493,18 +493,105 @@ work on a guess. Snapshots also carry a `note` separating "nothing to click"
 from "nothing measurable", because those need different responses from both the
 user and the model.
 
+### The Windows smoke test, and what it found
+
+Gagan ran the smoke test this section used to ask for — `victor click --dry-run`,
+then `victor click`, on File Explorer. The headline passed: perception read
+**147 real elements in ~235 ms**, the click fired through UI Automation's Invoke
+pattern and reported `via accessibility` rather than a synthetic click, and
+`victor quota` still read zero afterwards.
+
+It also found four defects, which is roughly the number that prediction implied
+and is why the section was written. Every one was invisible from macOS.
+
+**The environment did not even start clean.** `tzdata` was undeclared, and
+Windows ships no IANA database — so the quota ledger's `ZoneInfo("America/Los_Angeles")`,
+which exists because Groq's day rolls at UTC and Google's at Pacific, took ~57
+tests down with it. Three further failures were test portability: two used POSIX
+shell syntax against a tool that runs PowerShell, and the 200 ms abort budget
+was written from a macOS measurement. Windows aborts in ~412 ms because
+PowerShell's spawn and teardown dominate; the budget is now per-platform, and
+the 26 ms figure in the README is labelled as the macOS one.
+
+**Perception saw about half of File Explorer.** The climb from the focused
+control to its owning window stopped at the first Pane ancestor, on the theory
+that the desktop root is a Pane. It is — but so is six levels of Explorer's
+internal scaffolding:
+
+```
+ListControl   'Items View'                <- climb stopped here
+PaneControl   'Shell Folder View'
+PaneControl   'Folder Layout Pane'
+PaneControl   'Explorer Pane'
+PaneControl   ''
+PaneControl   'Downloads'
+WindowControl 'Downloads - File Explorer' <- wanted this
+PaneControl   'Desktop 1'                 <- avoiding this
+```
+
+147 elements instead of 248. The 101 missing ones were Back, Forward, the
+address bar, Search, Cut, Copy, Paste, Rename, Delete, Sort, View and the window
+buttons — the entire actionable toolbar of an app the plan names as a target.
+The visible symptom was `victor uia --dump` reporting the window title as `Items
+View`. It now climbs to the first `WindowControl` and falls back to the
+foreground window if there is none.
+
+**`focus_app` reported success without focusing.** `SetActive` cannot beat the
+Windows foreground lock — when the caller is not already in front, the request
+is downgraded to flashing a taskbar button, and it returns no error:
+
+```
+focus_app('Downloads') -> ok=True detail='focused Downloads'
+actual foreground:      'Clone and smoke test Vic… - Visual Studio Code'
+```
+
+This is the same shape as the macOS modifier-flag bug two sections up: every
+layer reporting success while nothing happened. The fix is the verification, not
+a workaround for the lock — a workaround that is not verified is how this got
+here. `launch_app` now checks whether the app is running *before* focusing, so a
+focus that is merely blocked no longer opens a second window.
+
+**A modifier could be left physically held.** The Windows chord pressed each key
+before recording it, leaving a one-statement window where a key is down and
+untracked — so the `finally` released nothing. Gagan injected a failure mid-chord
+and confirmed a stuck physical Ctrl via `GetAsyncKeyState`. Reachable through a
+COM error or a `KeyboardInterrupt`, which is how the kill switch is triggered,
+and on Windows a stuck modifier affects the whole machine rather than just
+Victor. Intent is recorded before acting now, and the release is unconditional,
+matching macOS.
+
+**`victor click` reached execution without passing the safety layer.** The CLI
+called `Desktop.click` directly: no classifier, no confirmation, no journal.
+That is structurally the same hole P5 closed by refusing to type into terminals,
+and it matters more on Windows, where Invoke on an Explorer list item *opens* the
+file — Gagan's click on a document launched it into Chrome. The classifier also
+read `setup.exe` as "clicking navigates the interface", so `victor click` on an
+installer would have run it unconfirmed.
+
+Both halves are fixed. `victor click` and `victor press` now build the same
+interceptor and journal the agent builds, with `--yes` for the smoke-test
+workflow; and clicks whose label names a file that *runs* ask first, while
+documents stay silent. "A person typed it" is not the same as "a person
+understood what it would do", and the classifier is the part that knows the
+difference between `notes.txt` and `setup.exe`.
+
+Two smaller things: `--app` was accepted and silently ignored by the Windows
+backend, so every command read the foreground window regardless of what was
+asked for — silently targeting the wrong window being precisely the failure
+class this project exists to avoid. And `--apps` was dead on Windows because the
+enumeration lived in the macOS backend. Both implemented.
+
 ### Still outstanding
 
+- **Windows has had one smoke test, not a verification.** Perception, a click,
+  the quota ledger and the fixes above are exercised; typing, chords, scrolling
+  and the vision fallback are not. Every fix has a regression test, but the
+  tests drive a fake `uiautomation` — they prove the logic, not the binding.
 - The exit gate ran through the tool registry, not through the model — there is
   still no API key, so no run has gone voice → LLM → click end to end.
-- `WindowsActuator` has never executed. It is ~120 lines with no branching, and
-  everything above it is tested — but "compiles and mirrors the macOS one" is
-  not "works", and the modifier-flag bug above is a reminder of what that gap
-  hides. `victor click --dry-run`, then `victor click`, on File Explorer is the
-  smoke test.
-- Windows has the same class of problem waiting: `PressKey`/`ReleaseKey` hold
-  *real* keys rather than setting flags, so the `finally` in `WindowsActuator.key`
-  is load-bearing in a way its macOS counterpart is not.
+- The re-verification Gagan asked for (`victor uia --dump` naming the real
+  window, then a gated click on a `.txt`) has **not** been run: it needs a
+  Windows machine, and this pass was written on macOS.
 
 ---
 

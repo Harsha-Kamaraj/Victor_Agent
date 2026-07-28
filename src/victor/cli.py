@@ -920,6 +920,37 @@ def _open_desktop(app_name: str | None):
     return desktop
 
 
+def _gated_desktop_tools(desktop, *, yes: bool = False):
+    """The desktop tools, behind the same gate the agent gets.
+
+    ``victor click`` used to call :meth:`Desktop.click` directly, so it reached
+    execution without a classifier, a confirmation or a journal entry. That is
+    the same shape of hole P5 closed for terminals - an actuation path around
+    the safety layer - and it matters more on Windows, where UI Automation's
+    Invoke on a file opens it: a click on an installer would have run it.
+
+    So the CLI now builds the same interceptor and journal the agent builds. It
+    is a manual driver, but "a person typed it" is not the same as "a person
+    understood what it would do", and the classifier is the part that knows the
+    difference between notes.txt and setup.exe.
+    """
+    from .safety import ActionJournal, AutoConfirmer, SafetyInterceptor, build_confirmer
+    from .tools import ToolRegistry
+    from .tools.desktop import build_desktop_tools
+
+    settings = _settings()
+    journal = ActionJournal(settings.paths.ensure().journal_file, session="cli")
+    interceptor = SafetyInterceptor(
+        confirmer=AutoConfirmer(True) if yes else build_confirmer(),
+        journal=journal,
+        require_confirmation=settings.confirm_destructive and not yes,
+    )
+    registry = ToolRegistry(interceptor)
+    for tool in build_desktop_tools(desktop=desktop):
+        registry.register(tool)
+    return registry, interceptor
+
+
 @app.command()
 def click(
     target: Annotated[
@@ -937,6 +968,9 @@ def click(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Say what would be clicked, and stop.")
     ] = False,
+    yes: Annotated[
+        bool, typer.Option("--yes", help="Skip the confirmation prompt. Use with care.")
+    ] = False,
 ) -> None:
     """Click one control, by label or index. Zero API calls.
 
@@ -945,6 +979,9 @@ def click(
     anything anywhere. Between them they are the whole perception-actuation
     loop with the model taken out, which is what makes them the right thing to
     run when checking Victor on a new machine.
+
+    Gated exactly as the agent is: consequential clicks ask first, and every
+    one is journalled.
     """
     desktop = _open_desktop(app_name)
 
@@ -978,18 +1015,28 @@ def click(
     console.print(f"  {chosen.render()}")
 
     if dry_run:
+        from .safety.classify import classify
+
+        verdict = classify("click", {"index": chosen.index, "label": chosen.label}, mutating=True)
+        console.print(f"[dim]{verdict.risk}:[/dim] {verdict.reason}")
         console.print("[yellow]dry run:[/yellow] nothing was clicked")
         return
 
-    result = desktop.click(
-        chosen.index, chosen.label, button="right" if right else "left", double=double
+    registry, _ = _gated_desktop_tools(desktop, yes=yes)
+    outcome = registry.run(
+        "click",
+        {
+            "index": chosen.index,
+            "label": chosen.label,
+            "button": "right" if right else "left",
+            "double": double,
+        },
     )
-    if not result.ok:
-        err_console.print(f"[red]{result.detail}[/red]")
+    if not outcome.ok:
+        err_console.print(f"[red]{outcome.error}[/red]")
         raise typer.Exit(1)
-    console.print(f"[green]{result.detail}[/green] [dim]via {result.method}[/dim]")
-    if result.window:
-        console.print(f"[dim]now showing: {result.window} ({result.element_count} elements)[/dim]")
+    method = outcome.metadata.get("method") or "?"
+    console.print(f"[green]{outcome.output}[/green] [dim]via {method}[/dim]")
 
 
 @app.command()
@@ -1001,8 +1048,15 @@ def press(
     show: Annotated[
         bool, typer.Option("--vocabulary", help="List the key names that work on both platforms.")
     ] = False,
+    yes: Annotated[
+        bool, typer.Option("--yes", help="Skip the confirmation prompt. Use with care.")
+    ] = False,
 ) -> None:
-    """Press a keyboard shortcut. ``mod`` is Ctrl on Windows and Command on macOS."""
+    """Press a keyboard shortcut. ``mod`` is Ctrl on Windows and Command on macOS.
+
+    Gated as the agent is: shortcuts that discard work ask first, typing into a
+    terminal is refused, and each press is journalled.
+    """
     from .desktop.keys import UnknownKey, known_keys, parse_sequence
 
     if show:
@@ -1027,11 +1081,12 @@ def press(
             raise typer.Exit(1)
 
     console.print(f"[dim]pressing {' then '.join(str(c) for c in chords)}[/dim]")
-    result = desktop.press_keys(keys)
-    if not result.ok:
-        err_console.print(f"[red]{result.detail}[/red]")
+    registry, _ = _gated_desktop_tools(desktop, yes=yes)
+    outcome = registry.run("press_keys", {"keys": keys})
+    if not outcome.ok:
+        err_console.print(f"[red]{outcome.error}[/red]")
         raise typer.Exit(1)
-    console.print(f"[green]{result.detail}[/green]")
+    console.print(f"[green]{outcome.output}[/green]")
 
 
 @app.command()

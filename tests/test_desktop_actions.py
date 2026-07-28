@@ -868,6 +868,52 @@ def test_a_run_that_touched_no_tools_is_not_reported_as_free():
     assert "no tool calls" in result.summary()
 
 
+def cli_registry(tmp_path, monkeypatch, *, yes: bool, buttons: tuple[str, ...]):
+    """The CLI's own registry, with state pointed at a tmpdir.
+
+    ``VICTOR_DATA_DIR`` rather than ``data_dir=``: the field has an env alias,
+    so the keyword argument is silently ignored and the journal lands in the
+    developer's real ``~/.victor``. Which is how this helper came to exist.
+    """
+    from victor.cli import _gated_desktop_tools
+    from victor.config import Settings
+
+    monkeypatch.setattr(
+        "victor.cli._settings",
+        lambda: Settings(_env_file=None, VICTOR_DATA_DIR=str(tmp_path / "state")),
+    )
+    desk, _ = desktop(*buttons)
+    return _gated_desktop_tools(desk, yes=yes)
+
+
+def test_the_cli_click_path_is_gated_like_the_agent(tmp_path, monkeypatch):
+    """`victor click` used to call Desktop.click directly - no classifier, no
+    confirmation, no journal. On Windows that meant clicking an installer ran
+    it, because UIA's Invoke on a file opens it."""
+    registry, interceptor = cli_registry(
+        tmp_path, monkeypatch, yes=False, buttons=("setup.exe", "notes.txt")
+    )
+    assert "click" in registry
+    assert registry.interceptor is interceptor
+
+    # No terminal to confirm on, so the gate fails closed - which is itself the
+    # proof that the classifier and confirmer are in the path at all.
+    blocked = registry.run("click", {"index": 0, "label": "setup.exe"})
+    assert blocked.ok is False
+    assert interceptor.stats.denied + interceptor.stats.refused == 1
+
+    allowed = registry.run("click", {"index": 1, "label": "notes.txt"})
+    assert allowed.ok is True, "a document click should not have been stopped"
+
+
+def test_the_cli_click_path_journals(tmp_path, monkeypatch):
+    registry, interceptor = cli_registry(
+        tmp_path, monkeypatch, yes=True, buttons=("setup.exe",)
+    )
+    registry.run("click", {"index": 0, "label": "setup.exe"})
+    assert [e.tool for e in interceptor.journal.recent()] == ["click"]
+
+
 def test_the_desktop_tools_are_absent_unless_asked_for():
     """The capability is missing rather than discouraged."""
     from victor.config import Settings

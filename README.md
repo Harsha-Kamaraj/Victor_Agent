@@ -102,7 +102,7 @@ Stated upfront rather than discovered later:
 - **Windows and macOS, not Linux.** Perception needs an accessibility backend: UI Automation on Windows, the Accessibility API on macOS. Linux (AT-SPI) is not implemented. Everything else — voice, shell, git, safety, memory — is platform-neutral and runs anywhere.
 - **macOS needs permission.** Grant Accessibility to your terminal in System Settings → Privacy & Security → Accessibility, or the tree comes back empty. `victor doctor` says so plainly when it is missing.
 - **Actuation is off by default.** Clicking and typing exist on both platforms, but the agent only gets them when you pass `--desktop`. These tools act on whatever window is in front rather than inside a directory Victor was pointed at, which is a different kind of permission.
-- **Actuation is verified on macOS, not yet on Windows.** The Windows actuator mirrors the macOS one behind the same protocol and everything above it is tested, but it has not been run on a Windows machine. `victor click --dry-run` is the smoke test.
+- **Actuation is verified on both, at different depths.** macOS is verified end to end, including a two-task GUI run. Windows has had one smoke test against File Explorer: perception and a real click through UI Automation's Invoke both worked, and it found four defects — all now fixed, with regression tests. See the [build log](docs/BUILD-LOG.md#p5--desktop-actuation-) for what has and has not been exercised there.
 - **A locked screen looks like an empty one.** Both platforms stop reporting window geometry when locked, so Victor checks and says so rather than reporting a window with no controls.
 - **Free-tier numbers are declared, not discovered.** Providers change allowances without notice. The routing table in [src/victor/providers/registry.py](src/victor/providers/registry.py) states them conservatively, so Victor under-uses a generous tier rather than hitting a 429 mid-demo.
 
@@ -155,13 +155,15 @@ Budgets exist because the free tier is real. A run stops at 8 steps or 20,000 to
 
 ## Refusing to do anything stupid
 
-Every action is graded before it runs, and you can ask without running anything:
+Every action is graded before it runs — whether the agent chose it or you typed it — and you can ask without running anything:
 
 ```console
 $ victor check "ls -la"          safe     reads only
 $ victor check "rm -rf build"    confirm  rm deletes files
 $ victor check "rm -rf /"        deny     recursive delete of a root, home or drive path
 ```
+
+That includes clicks. A file manager is not a menu: UI Automation's Invoke on a file *opens* it, so `victor click "setup.exe"` would install something. Clicks are graded by label, so documents stay silent and executables ask.
 
 Two rules govern this, and they pull against each other. **Fail closed:** anything not recognised as read-only needs confirmation, because a classifier that guesses "probably fine" teaches you the prompt means nothing. **Avoid alarm fatigue:** if everything prompts, you stop reading and start saying yes — so the read-only set is deliberately generous and a confirmation is remembered for the rest of the session.
 
