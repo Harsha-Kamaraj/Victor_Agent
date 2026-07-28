@@ -93,7 +93,8 @@ def test_sudo_escalation_is_flagged_even_for_a_safe_command() -> None:
 
 def test_a_chain_is_classified_by_its_worst_segment() -> None:
     """`ls && rm -rf build` is a delete, not a listing."""
-    assert classify_shell("ls && rm -rf build").risk is Risk.DENY
+    assert classify_shell("ls && rm -rf /").risk is Risk.DENY
+    assert classify_shell("ls && rm -rf build").risk is Risk.CONFIRM
     assert classify_shell("ls && rm build.log").risk is Risk.CONFIRM
     assert classify_shell("ls && pwd && cat x").risk is Risk.SAFE
 
@@ -110,7 +111,16 @@ def test_a_dangerous_segment_anywhere_in_the_chain_counts() -> None:
     "command",
     [
         "rm -rf /",
+        "rm -rf /*",
+        "rm -rf ~",
         "rm -rf ~/",
+        "rm -rf ~/*",
+        "rm -rf $HOME",
+        "rm -rf ${HOME}",
+        "rm -fr /",
+        "rm -rf C:\\",
+        "rm -rf *",
+        "rm -rf .",
         "sudo rm -rf --no-preserve-root /",
         "mkfs.ext4 /dev/sda1",
         "dd if=/dev/zero of=/dev/sda",
@@ -122,6 +132,33 @@ def test_a_dangerous_segment_anywhere_in_the_chain_counts() -> None:
 )
 def test_catastrophic_commands_are_denied(command: str) -> None:
     assert classify_shell(command).risk is Risk.DENY
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -rf build",
+        "rm -rf node_modules",
+        "rm -rf ./dist",
+        "rm -rf src/generated",
+        "rm -rf /tmp/scratch",
+        "rm -fr ~/projects/old",
+    ],
+)
+def test_routine_recursive_deletes_are_confirmed_not_blocked(command: str) -> None:
+    """Blocking `rm -rf build` outright would make cleanup impossible.
+
+    The protection for a destructive-but-ordinary command is confirmation plus
+    the journal. Reserving DENY for damage with no recovery path is what keeps
+    a refusal meaningful instead of something users route around with --yes.
+    """
+    assert classify_shell(command).risk is Risk.CONFIRM
+
+
+def test_the_trailing_slash_does_not_change_the_verdict() -> None:
+    """`rm -rf ~` and `rm -rf ~/` are the same disaster."""
+    assert classify_shell("rm -rf ~").risk is Risk.DENY
+    assert classify_shell("rm -rf ~/").risk is Risk.DENY
 
 
 def test_denial_names_the_reason() -> None:

@@ -177,20 +177,91 @@ curl-pipe-to-shell, force push) is a guard against an obvious model mistake,
 
 ---
 
-## P3 · Safety & Reversibility
+## P3 · Safety & Reversibility ✅
 
 The gate for everything that touches the machine. Built *before* actuation, not
 bolted on after.
 
-**Build**
-- Interceptor classifying every action `safe` / `confirm` / `deny`.
-- Dry-run mode that prints the exact command and stops.
-- Spoken confirmation for destructive actions.
-- Kill switch that aborts mid-task from a global hotkey.
-- Action journal with undo recipes where an inverse exists.
+**Built**
+- `safety/classify.py` — every call graded safe / confirm / deny.
+- `safety/confirm.py` — typed and spoken confirmation, both failing closed.
+- `safety/journal.py` — append-only record with undo recipes where an inverse
+  exists, and an explicit reason where one does not.
+- `safety/killswitch.py` — cooperative abort with three checkpoints.
+- `safety/interceptor.py` — the piece that slots into P2's seam.
+- CLI: `victor check`, `victor journal list`, `victor journal undo`,
+  `--dry-run` and `--yes` on `victor do`.
 
-**Exit gate** — `rm -rf` is refused without confirmation, confirmed once spoken,
-recorded in the journal, and the kill switch stops a running task inside 200 ms.
+**Exit gate**, measured rather than asserted:
+
+| claim | result |
+| --- | --- |
+| `rm -rf` refused without confirmation | refused; the target file survived |
+| confirmed once approved | asked once, ran, file removed |
+| recorded in the journal | both the refusal and the execution, with undo status |
+| kill switch stops a task inside 200 ms | **26 ms** — a `sleep 30` returned in 0.43 s |
+
+### Two rules that pull against each other
+
+**Fail closed.** Anything not recognised as read-only needs confirmation. A
+classifier that guesses "probably fine" is worse than none, because it teaches
+the user that the prompt means nothing.
+
+**Avoid alarm fatigue.** If everything prompts, users stop reading and start
+saying yes, and the safety layer becomes a latency tax that protects nobody. So
+the read-only set is generous and specific — the commands a developer runs
+dozens of times an hour pass silently — and confirmations within one session
+are remembered rather than re-asked on every retry.
+
+### The denylist was too wide, and that was a safety bug
+
+The first implementation refused *every* `rm -rf`. Running the exit gate showed
+why that is wrong: `rm -rf build` and `rm -rf node_modules` are routine, so a
+permanent block makes ordinary cleanup impossible and pushes users toward
+`--yes`, which disables confirmation for everything else too. A refusal users
+route around is worse than a confirmation they read.
+
+`DENY` is now reserved for damage with no recovery path — the filesystem root,
+the whole home directory, a drive letter, a bare `*`, `mkfs`, `dd` to a device.
+Everything else destructive is confirmed and journalled. `rm -rf ~` and
+`rm -rf ~/` are both caught: a pattern that catches only one spelling of a
+disaster catches neither in practice.
+
+### The journal is honest about undo
+
+Most side effects have no inverse. `rm` does not, and neither does anything
+that reached the network. Entries carry either a real recipe or an explicit
+reason there is none, and the confirmation prompt says which *before* the user
+answers:
+
+```
+This cannot be undone: deleted files cannot be restored.
+```
+
+Presenting a plausible-looking undo would be worse than none, because it would
+encourage approving a delete on the belief it can be walked back. Confirmation
+is the protection for irreversible actions; undo is a convenience for the rest.
+
+One bug found by test and worth recording: the `git add` inverse was
+`git reset HEAD <paths>`, which fails with *ambiguous argument 'HEAD'* in a
+repository with no commits — exactly the `git init && git add .` case. It is
+now `git reset -- <paths>`, which works in both. An undo offered in a prompt
+that would not have worked is the same class of failure the design exists to
+prevent.
+
+### The kill switch is cooperative
+
+A `SIGKILL` mid-run would lose the journal entry for the action in flight,
+which is the one you would most want to keep. So tripping the switch sets a
+flag and three checkpoints observe it: between loop steps, before a tool runs,
+and inside the shell tool's wait loop — the last is what bounds abort latency
+by the 50 ms poll interval rather than by whatever the command decided to do.
+
+The first Ctrl-C stops the run cleanly; a second one interrupts for real, so a
+wedged process is still escapable. In `victor converse`, saying "stop" trips
+the same switch. A truly global hotkey needs an OS-level hook and a macOS
+permissions prompt; it is opt-in via `pynput` and, like push-to-talk, the
+system-wide binding lands with the HUD in P8.
 
 ---
 

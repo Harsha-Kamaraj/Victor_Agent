@@ -276,14 +276,49 @@ def _check_agent(settings: Settings) -> Iterator[Check]:
         yield Check("git repository", Status.SKIP, "cwd is not a git work tree")
 
 
+def _check_safety(settings: Settings) -> Iterator[Check]:
+    """P3: is anything actually standing between the model and the machine?"""
+    from .safety import ActionJournal, DenyingConfirmer, build_confirmer
+
+    if settings.dry_run:
+        yield Check("safety mode", Status.OK, "dry run - nothing will be executed")
+    elif not settings.confirm_destructive:
+        yield Check(
+            "safety mode",
+            Status.WARN,
+            "VICTOR_CONFIRM_DESTRUCTIVE=false - writes run without asking",
+            hint="Irreversible commands are still refused, but nothing else will "
+            "stop to check with you.",
+        )
+    else:
+        yield Check("safety mode", Status.OK, "destructive actions require confirmation")
+
+    confirmer = build_confirmer()
+    if isinstance(confirmer, DenyingConfirmer):
+        yield Check(
+            "confirmation",
+            Status.WARN,
+            "no terminal to ask on - destructive actions will be refused",
+            hint="Run from an interactive terminal, or use `victor converse` "
+            "to confirm out loud.",
+        )
+    else:
+        yield Check("confirmation", Status.OK, type(confirmer).__name__)
+
+    journal = ActionJournal(settings.paths.journal_file)
+    entries = list(journal)
+    reversible = sum(1 for e in entries if e.reversible)
+    detail = (
+        f"{len(entries)} actions recorded, {reversible} reversible"
+        if entries
+        else "no actions recorded yet"
+    )
+    yield Check("action journal", Status.OK, detail)
+
+
 def _check_pending() -> Iterator[Check]:
     """Capabilities the README promises that later phases will deliver."""
     on_windows = platform.system() == "Windows"
-    yield Check(
-        "safety interceptor",
-        Status.PENDING,
-        "P3 not implemented - mutating tools run behind only a denylist",
-    )
     if on_windows:
         yield Check("UIA tree access", Status.PENDING, "P4 not implemented")
     else:
@@ -309,6 +344,7 @@ def run_checks(settings: Settings, *, network: bool = True) -> list[Check]:
     checks += list(_check_dependencies())
     checks += list(_check_voice(settings))
     checks += list(_check_agent(settings))
+    checks += list(_check_safety(settings))
     if network:
         checks += list(_check_network(settings))
     else:

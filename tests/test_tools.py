@@ -178,7 +178,8 @@ def test_shell_rejects_a_missing_directory(tmp_path: Path) -> None:
     "command",
     [
         "rm -rf /",
-        "rm -fr ~/projects",
+        "rm -rf ~",
+        "rm -rf *",
         "sudo rm -rf --no-preserve-root /",
         "mkfs.ext4 /dev/sda1",
         "dd if=/dev/zero of=/dev/sda",

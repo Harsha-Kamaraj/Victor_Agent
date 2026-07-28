@@ -50,7 +50,6 @@ def test_doctor_reports_unbuilt_phases_as_pending(settings: Settings) -> None:
     pending = {c.name for c in checks if c.status is Status.PENDING}
 
     # Honesty check: nothing from a later phase may report OK yet.
-    assert "safety interceptor" in pending
     assert "memory index" in pending
     assert not any(
         c.status is Status.OK and "not implemented" in c.detail for c in checks

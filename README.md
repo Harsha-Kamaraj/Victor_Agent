@@ -2,9 +2,7 @@
 
 A voice-driven computer-use agent for Windows that runs entirely on free API tiers — because it reads the accessibility tree instead of guessing pixels.
 
-**Status: P0–P2 complete.** Plumbing, voice I/O, and the agent core (ReAct loop, tools, shell and git) are built and tested. Everything below the P2 line is not implemented yet, and `victor doctor` says so out loud rather than reporting a green tick for a pipeline that does not exist. See [docs/PLAN.md](docs/PLAN.md) for the full plan, including the parts that were deliberately cut.
-
-> **Safety note for the current state.** P3 is the phase that adds classification, spoken confirmation, dry-run and undo. It does not exist yet, so mutating tools run behind only a short denylist of irreversible commands. That denylist is a guard against an obvious model mistake, **not** a security boundary. Run with `VICTOR_DRY_RUN=true` until P3 lands.
+**Status: P0–P3 complete.** Plumbing, voice I/O, the agent core, and the safety layer are built and tested. Everything below the P3 line is not implemented yet, and `victor doctor` says so out loud rather than reporting a green tick for a pipeline that does not exist. See [docs/PLAN.md](docs/PLAN.md) for the full plan, including the parts that were deliberately cut.
 
 ## What it will do
 
@@ -65,7 +63,7 @@ Phases are units of execution and integration, not a calendar. Each has an exit 
 - [x] **P0 · Skeleton & Plumbing** — config, quota ledger, provider router, session tracing, CLI
 - [x] **P1 · Voice I/O** — mic → VAD → STT → TTS, push-to-talk, latency benchmarks
 - [x] **P2 · Agent Core** — ReAct loop, tool registry, shell and git tools
-- [ ] **P3 · Safety & Reversibility** — interceptor, dry-run, kill switch, action journal + undo
+- [x] **P3 · Safety & Reversibility** — interceptor, dry-run, kill switch, action journal + undo
 - [ ] **P4 · Screen Perception** — UIA tree reader, screen capture, vision fallback (parallelizable)
 - [ ] **P5 · Desktop Actuation** — UIA-driven clicks and typing, gated by P3, using P4
 - [ ] **P6 · Memory** — FAISS + fastembed, auto-captured error/fix pairs, recall injection
@@ -133,13 +131,45 @@ victor bench voice     # measure VAD and TTS latency here
 
 victor tools                        # what the agent can call
 victor do "what changed on main?"   # one task, printed
-victor do "..." --speak             # and read aloud
+victor do "..." --dry-run           # preview every action, execute none
 victor converse                     # hold a spoken conversation
+
+victor check "rm -rf build"         # how the safety layer grades a command
+victor journal list                 # what has been done, and what can be undone
+victor journal undo last            # reverse it, if an inverse exists
 ```
 
 `victor do` runs the ReAct loop: the model picks a tool, reads the result, and decides again, up to a step and token budget it reports at the end. `victor converse` wires that between the microphone and the speaker.
 
 Budgets exist because the free tier is real. A run stops at 8 steps or 20,000 tokens, identical consecutive tool calls are refused, and tool output is truncated before it reaches the model — one noisy `git log` can otherwise exceed the 8,000 tokens-per-minute allowance by itself.
+
+## Refusing to do anything stupid
+
+Every action is graded before it runs, and you can ask without running anything:
+
+```console
+$ victor check "ls -la"          safe     reads only
+$ victor check "rm -rf build"    confirm  rm deletes files
+$ victor check "rm -rf /"        deny     recursive delete of a root, home or drive path
+```
+
+Two rules govern this, and they pull against each other. **Fail closed:** anything not recognised as read-only needs confirmation, because a classifier that guesses "probably fine" teaches you the prompt means nothing. **Avoid alarm fatigue:** if everything prompts, you stop reading and start saying yes — so the read-only set is deliberately generous and a confirmation is remembered for the rest of the session.
+
+Confirmation fails closed everywhere. Silence is no, an unparseable answer is no, no terminal to ask on is no. Spoken confirmation matters most here: "no" misheard as "go" would run a delete you just refused, so the affirmative set is small and explicit and anything outside it is a refusal.
+
+**The journal is honest about undo.** Most side effects have no inverse, so the prompt tells you which *before* you answer:
+
+```
+Victor wants to run:
+  rm notes.txt
+  rm deletes files
+  This cannot be undone: deleted files cannot be restored.
+Continue? [y/N]
+```
+
+A plausible-looking undo would be worse than none — it would encourage approving a delete on the belief it can be walked back. Confirmation is the protection for irreversible actions; `victor journal undo` is a convenience for the reversible ones.
+
+**The kill switch is cooperative, not a `SIGKILL`** — killing mid-write would lose the journal entry for the action in flight, which is the one you would most want. Ctrl-C, or saying "stop" during `victor converse`, trips a flag that three checkpoints observe: between loop steps, before a tool runs, and inside the shell wait loop. Measured abort latency on a running `sleep 30`: **26 ms**.
 
 Developing on macOS or Linux is supported for everything except P4/P5 — see the [development environment notes](docs/PLAN.md#development-environment), which include the Homebrew `pyexpat` and macOS hidden-`.pth` workarounds.
 

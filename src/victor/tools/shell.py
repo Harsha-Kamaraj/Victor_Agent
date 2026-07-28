@@ -28,14 +28,33 @@ MAX_TIMEOUT = 300.0
 POLL_INTERVAL = 0.05
 """How often the wait loop checks the kill switch. Bounds abort latency."""
 
-#: Patterns refused outright until P3's classifier exists. Irreversible,
-#: system-wide, or a trivially recognisable mistake.
+#: Targets whose recursive deletion cannot be recovered from and is never a
+#: legitimate instruction: the filesystem root, the whole home directory, a
+#: drive letter, or a bare glob of any of them.
+#: The optional trailing slash matters: `rm -rf ~` and `rm -rf ~/` are the same
+#: disaster, and a pattern that catches only one of them catches neither in
+#: practice. The alternatives are anchored so `~/projects/old` does not match -
+#: that is a specific path the user can read in a confirmation prompt.
+#: A bare `*` is included: `rm -rf *` empties the working directory, which is
+#: the same disaster as naming it. `rm -rf src/*` is not - that is a specific
+#: path the user can read.
+_DOOMED_TARGET = (
+    r"(/|~/?|\$HOME/?|\$\{HOME\}/?|[A-Za-z]:\\?|/\*|~/\*|\$HOME/\*|\*|\.\.?/?\*?)"
+)
+
+#: Refused outright. Reserved for damage with no recovery path at all.
+#:
+#: Note what is deliberately *not* here: `rm -rf build`, `rm -rf node_modules`
+#: and similar. Those are routine, and the protection the design promises for
+#: them is confirmation plus the journal, not a permanent block. Widening this
+#: list to every recursive delete would make the agent unable to do ordinary
+#: cleanup while adding no safety - it would just push users to --yes.
 CATASTROPHIC = (
     (
-        re.compile(r"\brm\s+(-[a-zA-Z]*\s+)*-[a-zA-Z]*[rR][a-zA-Z]*f|\brm\s+-fr\b"),
-        "recursive force delete",
+        re.compile(rf"\brm\s+(-[a-zA-Z-]+\s+)*{_DOOMED_TARGET}(\s|$)"),
+        "recursive delete of a root, home or drive path",
     ),
-    (re.compile(r"\brm\b.*\s/(\s|$)"), "delete of /"),
+    (re.compile(r"--no-preserve-root"), "explicitly disables the root guard"),
     (re.compile(r"\bmkfs(\.\w+)?\b"), "filesystem format"),
     (re.compile(r"\bdd\b.*\bof=/dev/"), "raw write to a block device"),
     (re.compile(r">\s*/dev/[sh]d[a-z]"), "raw write to a block device"),

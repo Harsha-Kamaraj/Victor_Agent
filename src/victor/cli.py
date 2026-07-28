@@ -33,6 +33,8 @@ voice_app = typer.Typer(help="Voice devices and models.", no_args_is_help=True)
 app.add_typer(voice_app, name="voice")
 bench_app = typer.Typer(help="Measured latency benchmarks.", no_args_is_help=True)
 app.add_typer(bench_app, name="bench")
+journal_app = typer.Typer(help="Review and reverse past actions.", no_args_is_help=True)
+app.add_typer(journal_app, name="journal")
 
 _STATUS_STYLE: dict[Status, tuple[str, str]] = {
     Status.OK: ("green", "OK"),
@@ -388,6 +390,16 @@ def listen(
 # --- agent ----------------------------------------------------------------
 
 
+def _render_safety_summary(agent: object) -> None:
+    """Print what the safety layer did, if it was in play."""
+    interceptor = getattr(getattr(agent, "registry", None), "interceptor", None)
+    stats = getattr(interceptor, "stats", None)
+    if stats is None or stats.reviewed == 0:
+        return
+    if stats.confirmed or stats.refused or stats.denied or stats.dry_run:
+        console.print(f"[dim]safety: {stats.summary()}[/dim]")
+
+
 def _render_step(step: object) -> None:
     """Print one think-act cycle as it happens."""
     for call, result in getattr(step, "calls", ()):
@@ -408,21 +420,51 @@ def do_task(
     show_steps: Annotated[
         bool, typer.Option("--steps-visible/--quiet-steps", help="Print tool calls.")
     ] = True,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Preview actions without running them.")
+    ] = False,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Approve every action without asking. Use with care."),
+    ] = False,
 ) -> None:
     """Run one task through the agent and print the answer."""
     from .agent import build_agent
+    from .safety import AutoConfirmer, SignalKillSwitch
 
     settings = _settings()
-    with Trace.open(settings.paths.ensure().traces_dir, label="do") as trace:
-        agent = build_agent(settings, trace=trace, max_steps=steps)
+    if dry_run:
+        settings = settings.model_copy(update={"dry_run": True})
+
+    with (
+        Trace.open(settings.paths.ensure().traces_dir, label="do") as trace,
+        SignalKillSwitch() as switch,
+    ):
+        agent = build_agent(
+            settings,
+            trace=trace,
+            max_steps=steps,
+            kill_switch=switch,
+            confirmer=AutoConfirmer(True) if yes else None,
+        )
         if show_steps:
             agent.on_step = _render_step
         try:
             if settings.dry_run:
-                console.print("[yellow]dry run:[/yellow] mutating tools will not execute")
+                console.print(
+                    "[yellow]dry run:[/yellow] actions will be previewed, not executed"
+                )
+            if yes:
+                console.print(
+                    "[yellow]--yes:[/yellow] every action is pre-approved. "
+                    "Irreversible commands are still refused."
+                )
+            console.print("[dim]Ctrl-C stops the run.[/dim]")
             result = agent.run(task)
         finally:
             agent.close()
+
+    _render_safety_summary(agent)
 
     console.print()
     style = "bold green" if result.ok else "bold yellow"
@@ -451,6 +493,7 @@ def converse(
     ``--turns 0`` means keep going until interrupted.
     """
     from .agent import STT_PROMPT, build_agent
+    from .safety import SignalKillSwitch, SpokenConfirmer, is_stop_phrase
     from .voice import ListenMode, NoSpeechDetected, build_pipeline
 
     settings = _settings()
@@ -458,15 +501,29 @@ def converse(
 
     with Trace.open(settings.paths.ensure().traces_dir, label="converse") as trace:
         pipeline = build_pipeline(settings, trace=trace)
-        agent = build_agent(settings, trace=trace, max_steps=steps, voice=True)
+        switch = SignalKillSwitch()
+        # Destructive actions are confirmed out loud, since the user's hands
+        # are the reason they are talking to a computer in the first place.
+        agent = build_agent(
+            settings,
+            trace=trace,
+            max_steps=steps,
+            voice=True,
+            kill_switch=switch,
+            confirmer=SpokenConfirmer(pipeline),
+        )
         agent.on_step = _render_step
         try:
             warm_ms = pipeline.warm() * 1000
-            console.print(f"[dim]voice ready in {warm_ms:.0f}ms. Ctrl-C to stop.[/dim]")
+            console.print(
+                f"[dim]voice ready in {warm_ms:.0f}ms. "
+                "Say 'stop' or press Ctrl-C to abort.[/dim]"
+            )
 
             turn_index = 0
             while turns == 0 or turn_index < turns:
                 turn_index += 1
+                switch.reset()
                 console.print()
                 if listen_mode is ListenMode.PTT:
                     console.print("[bold]recording[/bold] - press Enter to stop")
@@ -483,15 +540,138 @@ def converse(
                     continue
                 console.print(f"[bold cyan]you:[/bold cyan] {heard.text}")
 
+                if is_stop_phrase(heard.text):
+                    switch.trip("spoken 'stop'")
+                    pipeline.speak("Stopped.")
+                    console.print("[yellow]stopped[/yellow]")
+                    continue
+
                 result = agent.run(heard.text)
                 console.print(f"[bold green]victor:[/bold green] {result.answer}")
                 if result.answer:
                     pipeline.speak(result.answer)
+                _render_safety_summary(agent)
         except KeyboardInterrupt:
             console.print("\n[dim]stopped[/dim]")
         finally:
+            switch.restore()
             pipeline.close()
             agent.close()
+
+
+@journal_app.command("list")
+def journal_list(
+    limit: Annotated[int, typer.Option("--limit", "-n")] = 20,
+) -> None:
+    """Show recent actions and whether they can be reversed."""
+    from .safety import ActionJournal
+
+    settings = _settings()
+    entries = ActionJournal(settings.paths.ensure().journal_file).recent(limit)
+    if not entries:
+        console.print("[dim]no actions recorded yet[/dim]")
+        return
+
+    table = Table(box=None)
+    table.add_column("id", style="bold")
+    table.add_column("when", style="dim")
+    table.add_column("action", overflow="fold")
+    table.add_column("outcome")
+    table.add_column("undo")
+
+    for entry in entries:
+        from .safety import summarise_call
+
+        if entry.undone_at:
+            undo_cell = Text("undone", style="dim")
+        elif entry.undo is not None:
+            undo_cell = Text(entry.undo.description, style="green")
+        else:
+            undo_cell = Text(entry.no_undo_reason or "no", style="yellow")
+
+        if entry.decision == "deny":
+            outcome = Text("blocked", style="red")
+        elif entry.ok:
+            outcome = Text("ran", style="green")
+        else:
+            outcome = Text("failed", style="yellow")
+
+        table.add_row(
+            entry.id,
+            entry.ts.replace("T", " ").replace("+00:00", ""),
+            summarise_call(entry.tool, entry.arguments),
+            outcome,
+            undo_cell,
+        )
+    console.print(table)
+
+
+@journal_app.command("undo")
+def journal_undo(
+    entry_id: Annotated[
+        str, typer.Argument(help="Entry id from `victor journal list`, or 'last'.")
+    ] = "last",
+) -> None:
+    """Reverse a recorded action, if it has an exact inverse."""
+    from .safety import ActionJournal, AutoConfirmer, SafetyInterceptor, undo_entry
+    from .tools import build_registry
+
+    settings = _settings()
+    journal = ActionJournal(settings.paths.ensure().journal_file)
+
+    if entry_id == "last":
+        entry = journal.last_reversible()
+        if entry is None:
+            console.print("[yellow]nothing recent can be undone[/yellow]")
+            console.print(
+                "[dim]Deletes and network calls have no inverse. "
+                "See `victor journal list` for why.[/dim]"
+            )
+            raise typer.Exit(1)
+    else:
+        entry = journal.get(entry_id)
+        if entry is None:
+            err_console.print(f"[red]no such entry:[/red] {entry_id}")
+            raise typer.Exit(1)
+
+    if entry.undo is None:
+        err_console.print(f"[yellow]cannot undo:[/yellow] {entry.no_undo_reason}")
+        raise typer.Exit(1)
+
+    console.print(f"This will {entry.undo.description}.")
+    # The undo itself is an action, so it goes through the same gate. Approving
+    # it here is the confirmation; asking twice would be theatre.
+    interceptor = SafetyInterceptor(confirmer=AutoConfirmer(True))
+    registry = build_registry(settings, interceptor=interceptor)
+    result = undo_entry(journal, registry, entry)
+
+    if result.error:
+        err_console.print(f"[red]undo failed:[/red] {result.error}")
+        raise typer.Exit(1)
+    console.print(f"[green]undone[/green] {entry.id}: {entry.undo.description}")
+
+
+@app.command()
+def check(
+    command: Annotated[str, typer.Argument(help="A shell command to classify.")],
+) -> None:
+    """Show how the safety layer would classify a command, without running it."""
+    from .safety import Risk, classify_shell
+
+    verdict = classify_shell(command)
+    colour = {Risk.SAFE: "green", Risk.CONFIRM: "yellow", Risk.DENY: "bold red"}[verdict.risk]
+    console.print(f"[{colour}]{verdict.risk}[/{colour}]  {verdict.reason}")
+    if verdict.trigger and verdict.trigger != command:
+        console.print(f"[dim]triggered by: {verdict.trigger}[/dim]")
+
+    if verdict.risk is not Risk.SAFE:
+        from .safety import plan_undo
+
+        undo, why_not = plan_undo("shell", {"command": command})
+        if undo is not None:
+            console.print(f"[dim]undo available: {undo.description}[/dim]")
+        else:
+            console.print(f"[dim]cannot be undone: {why_not}[/dim]")
 
 
 @app.command()
@@ -514,9 +694,9 @@ def tools() -> None:
         table.add_row(tool.spec.name, flag, tool.spec.description)
     console.print(table)
     console.print(
-        "\n[dim]Mutating tools are gated by the P3 interceptor, which is not built yet. "
-        "Until then only an irreversible-command denylist stands in the way - "
-        "see src/victor/tools/shell.py.[/dim]"
+        "\n[dim]Mutating calls are classified before they run: read-only commands pass "
+        "silently, writes ask for confirmation, and irreversible ones are refused. "
+        "Try `victor check '<command>'` to see a verdict without running anything.[/dim]"
     )
 
 

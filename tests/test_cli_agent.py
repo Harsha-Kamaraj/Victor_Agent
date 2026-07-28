@@ -107,14 +107,12 @@ def test_do_announces_dry_run(workspace: Path, monkeypatch: pytest.MonkeyPatch) 
     assert "dry run" in result.output
 
 
-def test_tools_command_lists_tools_and_flags_the_gap(workspace: Path) -> None:
+def test_tools_command_lists_tools(workspace: Path) -> None:
     result = runner.invoke(app, ["tools"])
 
     assert result.exit_code == 0
     assert "shell" in result.output
     assert "git" in result.output
-    # The missing safety layer must be stated, not implied.
-    assert "P3" in result.output
 
 
 def test_doctor_reports_the_agent_as_built(workspace: Path) -> None:
@@ -125,10 +123,9 @@ def test_doctor_reports_the_agent_as_built(workspace: Path) -> None:
     assert names["agent tools"].status is Status.OK
 
 
-def test_doctor_still_flags_the_missing_safety_layer(workspace: Path) -> None:
-    settings = Settings()
-    checks = {c.name: c for c in run_checks(settings, network=False)}
+def test_doctor_no_longer_flags_a_missing_safety_layer(workspace: Path) -> None:
+    """P3 shipped: the PENDING placeholder must be gone, not merely quieter."""
+    checks = {c.name: c for c in run_checks(Settings(), network=False)}
 
-    interceptor = checks["safety interceptor"]
-    assert interceptor.status is Status.PENDING
-    assert "denylist" in interceptor.detail
+    assert "safety interceptor" not in checks
+    assert checks["safety mode"].status is Status.OK
