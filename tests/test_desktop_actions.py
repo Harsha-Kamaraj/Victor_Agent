@@ -455,6 +455,83 @@ def test_terminal_detection(title, process, expected):
     assert looks_like_terminal(title, process) is expected
 
 
+# --- flag discipline in the real macOS actuator ----------------------------
+#
+# FakeActuator cannot catch this class of bug: it records that a key was
+# pressed, not what state the key carried. So these drive the real MacActuator
+# against a fake Quartz, which works on any platform because the actuator only
+# touches the module through the handle it cached.
+
+
+class FakeQuartz:
+    """Records every posted event, and what flags it carried."""
+
+    kCGHIDEventTap = "hid"
+    kCGScrollEventUnitLine = 1
+    kCGEventMouseMoved = "moved"
+
+    def __init__(self) -> None:
+        self.posted: list[dict] = []
+
+    def CGEventCreateKeyboardEvent(self, source, code, down):  # noqa: N802
+        return {"code": code, "down": down, "flags": None, "text": ""}
+
+    def CGEventSetFlags(self, event, flags):  # noqa: N802
+        event["flags"] = flags
+
+    def CGEventKeyboardSetUnicodeString(self, event, length, text):  # noqa: N802
+        event["text"] = text
+
+    def CGEventPost(self, tap, event):  # noqa: N802
+        self.posted.append(event)
+
+
+def mac_actuator() -> tuple[object, FakeQuartz]:
+    from victor.desktop.actions import MacActuator
+
+    actuator = MacActuator()
+    quartz = FakeQuartz()
+    actuator._quartz = quartz
+    actuator._services = object()
+    actuator._source = "source"
+    return actuator, quartz
+
+
+def test_a_chord_key_up_carries_no_flags():
+    """The leak that made typing after cmd+a silently do nothing."""
+    actuator, quartz = mac_actuator()
+    actuator.key(keymap.Chord("a", ("cmd",)))
+    down, up = quartz.posted[0], quartz.posted[1]
+    assert down["down"] is True
+    assert down["flags"] == keymap.MAC_MODIFIER_FLAGS["cmd"]
+    assert up["down"] is False
+    assert up["flags"] == 0
+
+
+def test_a_chord_is_followed_by_real_modifier_releases():
+    actuator, quartz = mac_actuator()
+    actuator.key(keymap.Chord("a", ("cmd",)))
+    releases = quartz.posted[2:]
+    assert {e["code"] for e in releases} == set(actuator._MODIFIER_KEYCODES)
+    assert all(e["down"] is False and e["flags"] == 0 for e in releases)
+
+
+def test_every_typed_event_clears_the_flags():
+    """A new CGEvent inherits the window server's modifier state."""
+    actuator, quartz = mac_actuator()
+    actuator.type_text("hi")
+    assert [e["text"] for e in quartz.posted] == ["h", "h", "i", "i"]
+    assert all(e["flags"] == 0 for e in quartz.posted)
+
+
+def test_typing_sends_one_character_per_event():
+    """Apps handling keyDown: take the first character and drop the rest."""
+    actuator, quartz = mac_actuator()
+    actuator.type_text("8*8")
+    assert all(len(e["text"]) == 1 for e in quartz.posted)
+    assert "".join(e["text"] for e in quartz.posted[::2]) == "8*8"
+
+
 # --- is anyone looking at the screen? --------------------------------------
 
 
