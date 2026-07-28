@@ -1,10 +1,26 @@
-"""Screen perception: read the accessibility tree, capture only when needed.
+"""Screen perception and desktop control.
 
-Read-only by construction. Nothing in this package moves a mouse or presses a
-key - that is P5, and it is gated behind the P3 safety layer. Keeping the two
-apart is why perception could be built and tested out of order.
+Perception (P4) is read-only by construction and lives in :mod:`elements`,
+:mod:`uia`, :mod:`ax`, :mod:`capture` and :mod:`vision`. Actuation (P5) lives in
+:mod:`actions` and :mod:`keys`, and every path into it is gated behind the P3
+safety layer. Keeping the two apart is why perception could be built and tested
+out of order, and why reading a screen still costs nothing and asks nothing.
 """
 
+from .actions import (
+    ActionRefused,
+    ActionResult,
+    ActuationUnavailable,
+    Actuator,
+    Desktop,
+    FakeActuator,
+    MacActuator,
+    Resolution,
+    UnsupportedActuator,
+    WindowsActuator,
+    normalise_label,
+    select_actuator,
+)
 from .ax import AXBackend, list_applications
 from .capture import (
     CaptureUnavailable,
@@ -30,9 +46,21 @@ from .vision import VisionAnswer, VisionClient, VisionUnavailable, annotate
 
 __all__ = [
     "AXBackend",
+    "ActionRefused",
+    "ActionResult",
+    "ActuationUnavailable",
+    "Actuator",
     "Backend",
     "CaptureUnavailable",
+    "Desktop",
     "Element",
+    "FakeActuator",
+    "MacActuator",
+    "Resolution",
+    "UnsupportedActuator",
+    "WindowsActuator",
+    "normalise_label",
+    "select_actuator",
     "FakeBackend",
     "FakeNode",
     "PerceptionUnavailable",
