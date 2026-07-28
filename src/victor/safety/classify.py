@@ -269,13 +269,50 @@ def _classify_segment(segment: str) -> Classification:
     )
 
 
+#: Branch names whose history is shared, so rewriting it hurts other people.
+DEFAULT_BRANCHES = frozenset({"main", "master", "develop", "trunk", "release"})
+
+#: The force flags proper. `--force-with-lease` is deliberately absent: it
+#: refuses to overwrite work it has not seen, which is the safe way to do this.
+_FORCE_FLAGS = frozenset({"--force", "-f"})
+
+
 def _classify_git_shell(args: list[str], segment: str) -> Classification:
     subcommand = next((a for a in args if not a.startswith("-")), None)
     if subcommand is None:
         return Classification(Risk.SAFE, "git with no subcommand")
     if subcommand in GIT_READ_ONLY:
         return Classification(Risk.SAFE, f"git {subcommand} reads only")
+    if subcommand == "push":
+        return _classify_git_push(args, segment)
     return Classification(Risk.CONFIRM, f"git {subcommand} may modify the repository", segment)
+
+
+def _classify_git_push(args: list[str], segment: str) -> Classification:
+    """Force-pushing is routine on a feature branch and destructive on a shared one.
+
+    Counting positional arguments is why this is not a regex: ``git push
+    --force origin feature-x`` names its target and is confirmable, while
+    ``git push --force`` does not, and the current branch cannot be known from
+    the command string. The unnamed case is refused rather than guessed at.
+    """
+    if not any(a in _FORCE_FLAGS for a in args):
+        return Classification(Risk.CONFIRM, "git push contacts a remote", segment)
+
+    positional = [a for a in args if not a.startswith("-")]
+    refspecs = positional[2:]  # skip "push" and the remote
+
+    if not refspecs:
+        return Classification(
+            Risk.DENY,
+            "force push with no branch named - the current branch may be a shared one",
+            segment,
+        )
+    if any(ref.split(":")[-1] in DEFAULT_BRANCHES for ref in refspecs):
+        return Classification(Risk.DENY, "force push to a shared default branch", segment)
+    return Classification(
+        Risk.CONFIRM, f"force push rewrites history on {', '.join(refspecs)}", segment
+    )
 
 
 def classify_git(subcommand: str, args: list[str] | None = None) -> Classification:

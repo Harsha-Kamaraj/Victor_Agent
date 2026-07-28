@@ -49,21 +49,68 @@ _DOOMED_TARGET = (
 #: them is confirmation plus the journal, not a permanent block. Widening this
 #: list to every recursive delete would make the agent unable to do ordinary
 #: cleanup while adding no safety - it would just push users to --yes.
+#: Operating-system directories whose contents are not the user's to delete.
+#: Narrower than "anything system-owned" on purpose: /etc and /usr/local are
+#: routinely edited by developers and stay at CONFIRM.
+_SYSTEM_PATH = (
+    r"(C:\\+Windows|%SystemRoot%|\$env:SystemRoot|"
+    r"C:\\+Program\s+Files|/System/|/Library/Extensions)"
+)
+
+#: Verbs that would damage such a directory rather than read it.
+_DESTRUCTIVE_VERB = r"\b(rm|rmdir|del|erase|rd|unlink|mv|move|Remove-Item|takeown|icacls)\b"
+
+#: Branch names a force-push to is almost never recoverable in a team.
+_DEFAULT_BRANCH = r"\b(main|master|develop|trunk|release)\b"
+
 CATASTROPHIC = (
     (
         re.compile(rf"\brm\s+(-[a-zA-Z-]+\s+)*{_DOOMED_TARGET}(\s|$)"),
         "recursive delete of a root, home or drive path",
     ),
     (re.compile(r"--no-preserve-root"), "explicitly disables the root guard"),
+    # Windows equivalents of the same disaster.
+    (
+        re.compile(r"\b(del|rd|rmdir)\b.*(/s\b.*)?[A-Za-z]:\\+(\s|$|\*)", re.I),
+        "recursive delete of a drive root",
+    ),
+    (
+        re.compile(r"\bRemove-Item\b.*-Recurse.*\s[A-Za-z]:\\+(\s|$|\*)", re.I),
+        "recursive delete of a drive root",
+    ),
+    (
+        re.compile(rf"{_DESTRUCTIVE_VERB}[^|;]*{_SYSTEM_PATH}", re.I),
+        "writes into an OS directory",
+    ),
+    (re.compile(r"\bdiskpart\b", re.I), "partition table editing"),
+    (re.compile(r"\bvssadmin\b.*\bdelete\b.*\bshadows\b", re.I), "deletes volume shadow copies"),
+    # `\b/set` never matches: the char before `/` is a space, so there is no
+    # word boundary there.
+    (re.compile(r"\bbcdedit\b.*(\bdelete\b|/set\b)", re.I), "boot configuration change"),
+    (re.compile(r"\breg\s+delete\b.*\bHKLM\b", re.I), "deletes a system registry hive"),
     (re.compile(r"\bmkfs(\.\w+)?\b"), "filesystem format"),
     (re.compile(r"\bdd\b.*\bof=/dev/"), "raw write to a block device"),
     (re.compile(r">\s*/dev/[sh]d[a-z]"), "raw write to a block device"),
-    (re.compile(r"\bformat\s+[a-zA-Z]:"), "drive format"),
+    (re.compile(r"\bformat\s+[a-zA-Z]:", re.I), "drive format"),
     (re.compile(r"\b(shutdown|reboot|halt|poweroff)\b"), "power state change"),
     (re.compile(r":\(\)\s*\{.*\}\s*;\s*:"), "fork bomb"),
     (re.compile(r"\bchmod\s+-R\s+777\s+/"), "recursive permission wipe on /"),
     (re.compile(r"\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba)?sh"), "pipe-from-network to shell"),
-    (re.compile(r"\bgit\s+push\b.*--force"), "force push"),
+    # Force-pushing a feature branch is routine; force-pushing a shared default
+    # branch destroys other people's history. Only the latter is refused here.
+    # `(\s|$)` after the flag matters: without it `--force-with-lease`, which is
+    # the *safe* variant, matches `--force` and gets refused.
+    # The "force push with no branch named" case needs to count positional
+    # arguments, which a regex cannot do - it lives in classify._classify_git_shell.
+    # Two lookaheads rather than a sequence: `git push origin main --force` and
+    # `git push --force origin main` are the same command, and a pattern that
+    # only catches one argument order catches neither reliably.
+    (
+        re.compile(
+            rf"\bgit\s+push\b(?=[^|;]*(--force|-f)(\s|$))(?=[^|;]*{_DEFAULT_BRANCH})"
+        ),
+        "force push to a shared default branch",
+    ),
 )
 
 

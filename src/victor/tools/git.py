@@ -52,13 +52,12 @@ MUTATING = {
 
 ALLOWED = READ_ONLY | MUTATING
 
-#: Flags refused regardless of subcommand: irreversible, or reach the network
-#: in a way a spoken command should never trigger by accident.
-REFUSED_FLAGS = {
-    "--force": "force operations rewrite history",
-    "-f": "force operations rewrite history",
-    "--hard": "hard reset discards uncommitted work",
-}
+#: Branch names whose history is shared. Rewriting these hurts other people.
+DEFAULT_BRANCHES = {"main", "master", "develop", "trunk", "release"}
+
+#: Force flags proper. `--force-with-lease` is deliberately absent: it refuses
+#: to overwrite work it has not seen, which is the safe way to force-push.
+FORCE_FLAGS = {"--force", "-f"}
 
 DEFAULT_TIMEOUT = 30.0
 
@@ -128,12 +127,9 @@ class GitTool:
                 error=f"git {sub} would modify the repository, which is not permitted here",
             )
 
-        for flag in arguments:
-            if flag in REFUSED_FLAGS:
-                return ToolResult(
-                    ok=False,
-                    error=f"refused: {flag} - {REFUSED_FLAGS[flag]}. Ask the user to run it.",
-                )
+        refusal = _refuse_force_push(sub, arguments)
+        if refusal is not None:
+            return ToolResult(ok=False, error=f"refused: {refusal}. Ask the user to run it.")
 
         workdir = Path(cwd) if cwd else self.cwd
         if not workdir.is_dir():
@@ -163,6 +159,25 @@ class GitTool:
                 "mutating": sub in MUTATING,
             },
         )
+
+
+def _refuse_force_push(subcommand: str, args: list[str]) -> str | None:
+    """Refuse only the force pushes that destroy shared history.
+
+    A force push to a feature branch is routine and goes through confirmation
+    like any other mutation. A blanket refusal of every `--force` would make the
+    tool unusable for normal rebase workflows, and users route around tools that
+    refuse ordinary work.
+    """
+    if subcommand != "push" or not any(a in FORCE_FLAGS for a in args):
+        return None
+
+    refspecs = [a for a in args if not a.startswith("-")][1:]  # skip the remote
+    if not refspecs:
+        return "force push with no branch named - the current branch may be a shared one"
+    if any(ref.split(":")[-1] in DEFAULT_BRANCHES for ref in refspecs):
+        return "force push to a shared default branch"
+    return None
 
 
 def is_repository(path: Path | None = None) -> bool:

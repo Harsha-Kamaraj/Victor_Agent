@@ -287,10 +287,49 @@ def test_git_refuses_force_flags(repo: Path) -> None:
     assert "refused" in (result.error or "")
 
 
-def test_git_refuses_hard_reset(repo: Path) -> None:
-    result = GitTool(cwd=repo).run("reset", ["--hard", "HEAD~1"])
+def test_hard_reset_is_confirmed_rather_than_refused(repo: Path) -> None:
+    """Destructive but routine, like `rm -rf build`.
+
+    A blanket refusal of every `--hard` would make the tool unusable for normal
+    workflows, and users route around tools that refuse ordinary work. The
+    protection is confirmation plus a prompt saying it cannot be undone.
+    """
+    from victor.safety import Risk, classify_git, plan_undo
+
+    verdict = classify_git("reset", ["--hard", "HEAD~1"])
+    assert verdict.risk is Risk.CONFIRM
+
+    undo, why_not = plan_undo("git", {"subcommand": "reset", "args": ["--hard"]})
+    assert undo is None
+    assert "no exact inverse" in why_not
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["origin", "main", "--force"],
+        ["--force", "origin", "main"],
+        ["-f", "origin", "master"],
+        ["--force"],
+    ],
+)
+def test_git_refuses_destructive_force_pushes(repo: Path, args: list[str]) -> None:
+    result = GitTool(cwd=repo).run("push", args)
     assert not result.ok
-    assert "discards uncommitted work" in (result.error or "")
+    assert "refused" in (result.error or "")
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--force", "origin", "feature-x"],
+        ["--force-with-lease", "origin", "feature/thing"],
+    ],
+)
+def test_git_allows_force_pushing_a_feature_branch(repo: Path, args: list[str]) -> None:
+    """It will fail for lack of a remote - the point is it was not refused."""
+    result = GitTool(cwd=repo).run("push", args)
+    assert "refused" not in (result.error or "")
 
 
 def test_git_read_only_mode_blocks_mutation(repo: Path) -> None:

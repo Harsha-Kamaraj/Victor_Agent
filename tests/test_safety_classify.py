@@ -204,3 +204,61 @@ def test_unknown_tool_falls_back_on_its_declared_mutability() -> None:
 
 def test_empty_command_is_not_assumed_safe() -> None:
     assert classify_shell("").risk is Risk.CONFIRM
+
+
+# --- Windows and system-path rules (from the plan's DENY list) ------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "diskpart",
+        "format C:",
+        "del /s /q C:\\",
+        "rd /s /q C:\\",
+        "Remove-Item -Recurse -Force C:\\",
+        "rm -rf C:\\Windows\\System32",
+        "del C:\\Windows\\system32\\drivers",
+        "vssadmin delete shadows /all",
+        "bcdedit /set safeboot minimal",
+        "reg delete HKLM\\Software\\Foo /f",
+        "rm -rf /System/Library",
+    ],
+)
+def test_system_destroying_commands_are_denied(command: str) -> None:
+    assert classify_shell(command).risk is Risk.DENY
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push --force",
+        "git push -f",
+        "git push --force origin main",
+        "git push origin main --force",
+        "git push -f origin master",
+        "git push --force origin HEAD:main",
+    ],
+)
+def test_history_destroying_pushes_are_denied(command: str) -> None:
+    assert classify_shell(command).risk is Risk.DENY
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push --force origin feature-x",
+        "git push --force-with-lease origin feature/thing",
+        "git push origin main",
+    ],
+)
+def test_ordinary_pushes_are_only_confirmed(command: str) -> None:
+    """--force-with-lease is the *safe* variant and must not match --force."""
+    assert classify_shell(command).risk is Risk.CONFIRM
+
+
+def test_argument_order_does_not_change_the_verdict() -> None:
+    assert (
+        classify_shell("git push --force origin main").risk
+        is classify_shell("git push origin main --force").risk
+    )
