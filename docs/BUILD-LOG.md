@@ -333,13 +333,128 @@ could call**.
 
 ---
 
-## P5 · Desktop Actuation
+## P5 · Desktop Actuation ✅
 
-**Build** — click, type, focus, scroll, driven by UIA element handles rather
-than coordinates. Every action routed through P3's interceptor.
+**Build** — `desktop/keys.py` (one key vocabulary, two code tables),
+`desktop/actions.py` (`Actuator` protocol, `MacActuator`, `WindowsActuator`,
+`FakeActuator`, and the `Desktop` façade), `desktop/session.py`,
+`tools/desktop.py` (seven tools), classification rules for clicks and
+shortcuts, `victor click` and `victor press`.
 
-**Exit gate** — "open Settings and turn on dark mode" completes hands-free,
-with no coordinate guessing in the trace.
+**Exit gate** — the actuation half is verified live on macOS; the voice half
+still needs an API key and the two-task GUI run needs an unlocked screen. What
+did run is below.
+
+### Act on the control, not on its pixels
+
+Both platforms can perform a control's own action — `AXPress` on macOS, UI
+Automation's `Invoke` / `Toggle` / `SelectionItem` on Windows. That is better
+than clicking the rectangle's centre in three ways: it cannot miss, it needs no
+cursor movement so the screen does not visibly twitch while the agent works,
+and it is what the control actually *is* rather than a gesture that usually
+triggers it. A synthetic click at the OS-reported centre is the fallback, used
+only when a control offers no action at all.
+
+Every `ActionResult` reports which path it took, so the ratio is visible rather
+than assumed. Driving Calculator through seven buttons used `accessibility`
+seven times and `synthetic` zero.
+
+### The index is re-verified before it is used
+
+A snapshot is a photograph. A list that re-sorts between the photograph and the
+click hands index 7 to a different button, and the agent has no way to know.
+So `click` and `type_text` take the *label* as well as the index, re-read the
+tree (~20 ms), and refuse if they no longer match:
+
+```
+element 22 is '1', not 'Equals' - the screen changed since you looked.
+'Equals' is now element 29.
+```
+
+Naming where the target went means the model recovers in one step instead of
+retrying the same wrong index. This removes an entire class of failure for the
+cost of one tree walk.
+
+### Verified live, on real windows
+
+macOS Calculator, driven end to end with no model in the loop:
+
+| What | How | Result |
+|---|---|---|
+| 7 × 6 by clicking | 5 clicks, all via `AXPress` | display reads `42` |
+| 8 × 8 by typing | `type_text("8*8")`, `press_keys("return")` | display reads `64` |
+| Stale index | `click(22, "Equals")` after the tree moved | refused, correct index named |
+
+### One event per character
+
+The first typing implementation put the whole string on a single Quartz event
+with `CGEventKeyboardSetUnicodeString`. It looks right, and it works in text
+fields — but anything handling `keyDown:` itself sees one keystroke and drops
+the rest. Calculator was sent `8*8` and displayed `8`. Now each character is its
+own event, 4 ms apart. A silently truncated string is a worse failure than a
+slow one, and this one was silent.
+
+### The terminal hole
+
+P3 classifies shell commands before they run. None of that applies to a
+keystroke — an agent that can type into a Terminal window has a shell with the
+same privileges, reached by a path with no classification, no confirmation and
+no journal entry. Typing into a terminal emulator is therefore **refused**, not
+confirmed, with a pointer to the tool that does get read:
+
+> refused: the focused window is a terminal (harshak — zsh — 80x24), and typing
+> there would run a command that Victor's safety layer never sees. Use the shell
+> tool instead.
+
+`open_app` is restricted to plain application names for the same reason, and
+opening a terminal is itself a confirmation.
+
+### Clicking had to get its own classifier
+
+Falling back on the `mutating` flag would have meant confirming every click,
+which is precisely the alarm fatigue the safety layer exists to avoid. Clicks
+are classified by their label instead, on the reasoning that interfaces are
+designed so a *person* can recognise a consequential button. Matching is on
+whole words, so the **Delete** button asks and the **Deleted Items** folder does
+not; **Send** asks and **Sent Mail** does not.
+
+Writing the tests changed one rule: a right click never performs what its label
+names, it opens a menu, and whatever gets picked from that menu arrives as its
+own click with its own label. So the button check moved above the label check.
+
+### The zero-cost claim, counted
+
+The plan asks P5 to instrument API calls per task. Tools now report what they
+spent in `metadata["cost"]`, and `AgentResult` exposes `api_calls`,
+`free_tool_calls` and `zero_cost_ratio`. That made the vision fallback worth
+wiring as a tool: P4 built `VisionClient` and nothing consumed it, so the ratio
+would have been a constant 1.0 — true, and meaningless. `find_on_screen` is the
+only tool here that costs anything, it says so in its own description, and
+running out of vision quota leaves a working agent rather than a crashed one.
+
+### The screen was locked, and nothing said so
+
+Trying to run the two-task exit gate, both TextEdit and Calculator reported
+zero elements. The tree walk was fine. macOS had locked the screen, and a locked
+screen keeps answering accessibility queries while quietly refusing to report
+window geometry — so every rectangle came back empty and every element was
+filtered out for having no visible area.
+
+`desktop/session.py` now detects this on both platforms: `CGSessionCopyCurrentDictionary`
+on macOS, `OpenInputDesktop` on Windows, which also catches a UAC prompt holding
+the secure desktop. It fails open — a probe that cannot answer must not block
+work on a guess. Snapshots also carry a `note` separating "nothing to click"
+from "nothing measurable", because those need different responses from both the
+user and the model.
+
+### Still outstanding
+
+- The two-task GUI exit gate needs an unlocked screen; it has not been run end
+  to end with the model in the loop, because there is still no API key.
+- `WindowsActuator` has never executed. It is ~120 lines with no branching, and
+  everything above it is tested — but "compiles and mirrors the macOS one" is
+  not "works". `victor click --dry-run`, then `victor click`, on File Explorer
+  is the smoke test.
 
 ---
 

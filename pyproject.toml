@@ -5,17 +5,18 @@ build-backend = "hatchling.build"
 [project]
 name = "victor-agent"
 version = "0.1.0"
-description = "Voice-driven computer-use agent for Windows that reads the accessibility tree instead of guessing pixels."
+description = "Voice-driven computer-use agent for Windows and macOS that reads the accessibility tree instead of guessing pixels."
 readme = "README.md"
 requires-python = ">=3.13"
 license = { text = "MIT" }
 authors = [{ name = "Harsha K" }]
-keywords = ["agent", "voice", "computer-use", "uiautomation", "windows"]
+keywords = ["agent", "voice", "computer-use", "uiautomation", "accessibility", "windows", "macos"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "License :: OSI Approved :: MIT License",
     "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS :: MacOS X",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
 ]

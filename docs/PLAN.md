@@ -4,7 +4,7 @@
 > before implementation began. It is kept as authored, with phase headings ticked
 > as their exit gates pass and short *as-built* notes where reality diverged.
 >
-> **Build status: P0–P4 complete, P5–P8 outstanding.**
+> **Build status: P0–P5 complete, P6–P8 outstanding.**
 > What was actually built, why it differs, and the measured numbers live in
 > [BUILD-LOG.md](BUILD-LOG.md) — that file is the record of execution, this one
 > is the record of intent. Read this first.
@@ -90,14 +90,18 @@ These override the original architecture sketch. Each was verified against curre
 
 ### Further corrections, found while building
 
-The table above was verified before implementation. These four only surfaced once
-code ran, and each changed a decision above:
+The table above was verified before implementation. These only surfaced once code
+ran, and each changed a decision above:
 
 | Plan said | Building it showed | Response |
 |---|---|---|
 | `webrtcvad` 2.0.10 resolves on 3.14 | The wheel installs but **fails at import**: it does `import pkg_resources`, which setuptools 81+ removed | Victor ships its own adaptive energy VAD. WebRTC stays an opt-in backend. An unmaintained C extension is not worth putting on a voice agent's critical path |
 | Use the `groq` and `google-genai` SDKs | Groq is OpenAI-compatible, so one thin `httpx` client covers chat *and* STT and swaps provider by URL | Raw `httpx`. Two fewer dependencies, and `MockTransport` makes the whole provider layer testable without a network |
 | `victor = "victor.cli:app"` | Typer's `app` object cannot catch `VictorError` for a tidy exit code | `victor.cli:main`, a wrapper that maps expected failures to exit codes |
+| Actuation is "click the rect centre" | Both platforms can perform the control's *own* action — `AXPress`, UIA `Invoke`/`Toggle`/`SelectionItem` — which is invisible, needs no cursor move, and cannot miss | Handles first, synthetic click only when a control offers no action. Calculator drove entirely through `AXPress`; `method` is reported so the ratio is visible |
+| An index from the last `screen_read` is safe to click | A list that re-sorts between the read and the click hands index 7 to a different button | Every action re-reads the tree (~20 ms) and refuses if the label moved, naming where the target went |
+| One Quartz event can carry a whole string | Text fields accept it; anything handling `keyDown:` itself takes the first character and drops the rest — Calculator typed `8*8` and showed `8` | One event per character. A silently truncated string is a worse failure than a slow one |
+| A window with no listed controls has none | macOS stops reporting window geometry while the screen is locked, so every rect is empty and every element is filtered out | `session.py` detects a locked screen and a secure desktop on both platforms; snapshots carry a `note` distinguishing "nothing to click" from "nothing measurable" |
 | Python 3.14 verified | True on the target Windows box. On macOS, Homebrew's 3.13/3.14 link `pyexpat` against keg-only `expat` and **pip does not work at all** | Development on macOS uses 3.13 with `DYLD_LIBRARY_PATH` set — see BUILD-LOG. Windows is unaffected |
 
 ---
@@ -114,7 +118,7 @@ wildly in generosity — route each workload to whichever can afford it.**
 | **STT** | Groq `whisper-large-v3-turbo` | 28,800 audio sec/day, 2,000 req/day | Separate quota pool from chat — effectively free |
 | **TTS** | Piper (local ONNX) | Unlimited | Offline, ~100 ms, nothing to break |
 | **Embeddings** | `fastembed` (local ONNX) | Unlimited | Offline |
-| **UI perception** | Windows UIA tree | Unlimited | Local, ~20 ms, zero cost |
+| **UI perception** | Windows UIA tree / macOS AX tree | Unlimited | Local, ~20 ms, zero cost |
 | **Repo data** | GitHub REST API | 5,000 req/hr authenticated | Ample |
 
 **Zero-torch stack.** `fastembed` + `piper` + `webrtcvad` are ONNX or native C, avoiding a
@@ -364,7 +368,7 @@ Keys go in `.env` (git-ignored).
 
 ---
 
-## P5 — Desktop Actuation · **L** ⚠️ *schedule risk — the big integration*
+## P5 — Desktop Actuation · **L** ⚠️ *schedule risk — the big integration*  ✅ **shipped**
 
 **Goal:** *"Victor, open Gmail and search for invoices from last month"* works. This is where P2, P3, and P4 meet.
 

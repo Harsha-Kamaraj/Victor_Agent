@@ -2,7 +2,7 @@
 
 A voice-driven computer-use agent for **Windows and macOS** that runs entirely on free API tiers — because it reads the accessibility tree instead of guessing pixels.
 
-**Status: P0–P4 complete.** Plumbing, voice I/O, the agent core, the safety layer and screen perception are built and tested. Everything below the P4 line is not implemented yet, and `victor doctor` says so out loud rather than reporting a green tick for a pipeline that does not exist.
+**Status: P0–P5 complete.** Plumbing, voice I/O, the agent core, the safety layer, screen perception and desktop actuation are built and tested. Everything below the P5 line is not implemented yet, and `victor doctor` says so out loud rather than reporting a green tick for a pipeline that does not exist.
 
 Two documents, deliberately separate: [docs/PLAN.md](docs/PLAN.md) is the plan of record — what was intended, why, and what was deliberately cut. [docs/BUILD-LOG.md](docs/BUILD-LOG.md) is what actually happened, including the decisions that changed during implementation and the measured numbers.
 
@@ -67,7 +67,7 @@ Phases are units of execution and integration, not a calendar. Each has an exit 
 - [x] **P2 · Agent Core** — ReAct loop, tool registry, shell and git tools
 - [x] **P3 · Safety & Reversibility** — interceptor, dry-run, kill switch, action journal + undo
 - [x] **P4 · Screen Perception** — UIA tree reader, screen capture, vision fallback (parallelizable)
-- [ ] **P5 · Desktop Actuation** — UIA-driven clicks and typing, gated by P3, using P4
+- [x] **P5 · Desktop Actuation** — clicks and typing driven by accessibility handles, gated by P3, using P4
 - [ ] **P6 · Memory** — FAISS + fastembed, auto-captured error/fix pairs, recall injection
 - [ ] **P7 · Scout** — GitHub portfolio gap analysis, reusing P6's embedding stack
 - [ ] **P8 · Surface & Ship** — HUD, benchmarks, tests, demo
@@ -101,7 +101,9 @@ Stated upfront rather than discovered later:
 - **Targeted app support.** UIA is tuned for File Explorer, Edge/Chrome, Windows Settings, and VS Code. Other apps may work but aren't guaranteed.
 - **Windows and macOS, not Linux.** Perception needs an accessibility backend: UI Automation on Windows, the Accessibility API on macOS. Linux (AT-SPI) is not implemented. Everything else — voice, shell, git, safety, memory — is platform-neutral and runs anywhere.
 - **macOS needs permission.** Grant Accessibility to your terminal in System Settings → Privacy & Security → Accessibility, or the tree comes back empty. `victor doctor` says so plainly when it is missing.
-- **Actuation (P5) is still Windows-first.** Perception works on both today; clicking and typing does not exist yet on either.
+- **Actuation is off by default.** Clicking and typing exist on both platforms, but the agent only gets them when you pass `--desktop`. These tools act on whatever window is in front rather than inside a directory Victor was pointed at, which is a different kind of permission.
+- **Actuation is verified on macOS, not yet on Windows.** The Windows actuator mirrors the macOS one behind the same protocol and everything above it is tested, but it has not been run on a Windows machine. `victor click --dry-run` is the smoke test.
+- **A locked screen looks like an empty one.** Both platforms stop reporting window geometry when locked, so Victor checks and says so rather than reporting a window with no controls.
 - **Free-tier numbers are declared, not discovered.** Providers change allowances without notice. The routing table in [src/victor/providers/registry.py](src/victor/providers/registry.py) states them conservatively, so Victor under-uses a generous tier rather than hitting a 429 mid-demo.
 
 ## Setup
@@ -179,7 +181,7 @@ A plausible-looking undo would be worse than none — it would encourage approvi
 
 **The kill switch is cooperative, not a `SIGKILL`** — killing mid-write would lose the journal entry for the action in flight, which is the one you would most want. Ctrl-C, or saying "stop" during `victor converse`, trips a flag that three checkpoints observe: between loop steps, before a tool runs, and inside the shell wait loop. Measured abort latency on a running `sleep 30`: **26 ms**.
 
-Developing on macOS or Linux is supported for everything except P4/P5 — see the [development environment notes](docs/BUILD-LOG.md#development-environment), which include the Homebrew `pyexpat` and macOS hidden-`.pth` workarounds.
+Developing on macOS is supported for everything including P4/P5; Linux for everything except them — see the [development environment notes](docs/BUILD-LOG.md#development-environment), which include the Homebrew `pyexpat` and macOS hidden-`.pth` workarounds.
 
 ## Credits
 
