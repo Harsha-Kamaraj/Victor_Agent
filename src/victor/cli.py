@@ -810,6 +810,56 @@ def check(
 
 
 @app.command()
+def uia(
+    dump: Annotated[
+        bool, typer.Option("--dump", help="Print the focused window's element tree.")
+    ] = True,
+    demo: Annotated[
+        bool, typer.Option("--demo", help="Use the built-in fake tree instead of a real window.")
+    ] = False,
+    limit: Annotated[int, typer.Option("--limit", "-n", help="Elements to show.")] = 60,
+    refresh: Annotated[bool, typer.Option("--refresh", help="Bypass the cache.")] = False,
+) -> None:
+    """Print the focused window's element tree. Zero API calls.
+
+    This is the project's central claim made checkable: everything printed here
+    came from the operating system, locally, for free. Nothing was sent
+    anywhere and no quota was spent.
+    """
+    from .desktop import FakeBackend, PerceptionUnavailable, TreeReader, demo_tree
+
+    if not dump:
+        console.print("[dim]--dump is the only mode so far; it is implied.[/dim]")
+
+    reader = TreeReader(FakeBackend(demo_tree())) if demo else TreeReader()
+
+    ok, detail = reader.available()
+    if not ok:
+        err_console.print(f"[yellow]screen perception unavailable:[/yellow] {detail}")
+        err_console.print(
+            "[dim]Try `victor uia --demo` to see the output shape on any platform.[/dim]"
+        )
+        raise typer.Exit(5)
+
+    try:
+        snapshot = reader.snapshot(refresh=refresh)
+    except PerceptionUnavailable as exc:
+        err_console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(5) from exc
+
+    console.print(snapshot.render(limit=limit))
+    console.print()
+    console.print(
+        f"[dim]{len(snapshot)} elements in {snapshot.duration_ms:.0f}ms "
+        f"via {snapshot.backend} - 0 API calls, 0 quota spent[/dim]"
+    )
+    if snapshot.truncated:
+        console.print(
+            "[yellow]the walk hit its limit[/yellow] - raise --limit or narrow the window"
+        )
+
+
+@app.command()
 def tools() -> None:
     """List the tools the agent can call."""
     from .tools import build_registry

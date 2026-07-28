@@ -309,21 +309,59 @@ def _check_safety(settings: Settings) -> Iterator[Check]:
     yield Check("action journal", Status.OK, detail)
 
 
+def _check_perception(settings: Settings) -> Iterator[Check]:
+    """P4: can Victor read the screen, and capture it if the tree is not enough."""
+    from .desktop import ScreenCapture, TreeReader
+
+    ok, detail = TreeReader().available()
+    if ok:
+        yield Check("UIA tree access", Status.OK, detail)
+    elif platform.system() == "Windows":
+        yield Check(
+            "UIA tree access",
+            Status.FAIL,
+            detail,
+            hint="pip install -e '.[desktop]'",
+        )
+    else:
+        yield Check(
+            "UIA tree access",
+            Status.SKIP,
+            "Windows only - try `victor uia --demo` to see the output shape",
+        )
+
+    capture_ok, capture_detail = ScreenCapture.available()
+    yield (
+        Check("screen capture", Status.OK, capture_detail)
+        if capture_ok
+        else Check(
+            "screen capture",
+            Status.SKIP,
+            capture_detail,
+            hint="pip install -e '.[desktop]'",
+        )
+    )
+
+    if settings.has("gemini_api_key"):
+        yield Check("vision fallback", Status.OK, "gemini, falling back to groq")
+    elif settings.has("groq_api_key"):
+        yield Check(
+            "vision fallback",
+            Status.WARN,
+            "groq only - no GEMINI_API_KEY, so the scarcer half of the budget is missing",
+            hint="Free key: https://aistudio.google.com/apikey",
+        )
+    else:
+        yield Check("vision fallback", Status.FAIL, "no key for any vision model")
+
+
 def _check_pending() -> Iterator[Check]:
     """Capabilities the README promises that later phases will deliver."""
-    on_windows = platform.system() == "Windows"
-    # The routing table lists a vision chain, so say plainly that nothing can
-    # call it yet. `victor route vision` resolves a model; no client exists.
     yield Check(
-        "vision",
+        "desktop actuation",
         Status.PENDING,
-        "P4 not implemented - routing is wired, no client sends images",
+        "P5 not implemented - perception is read-only, nothing clicks yet",
     )
-    yield Check("screen capture", Status.PENDING, "P4 not implemented")
-    if on_windows:
-        yield Check("UIA tree access", Status.PENDING, "P4 not implemented")
-    else:
-        yield Check("UIA tree access", Status.SKIP, "Windows only")
     yield Check("memory index", Status.PENDING, "P6 not implemented")
 
 
@@ -346,6 +384,7 @@ def run_checks(settings: Settings, *, network: bool = True) -> list[Check]:
     checks += list(_check_voice(settings))
     checks += list(_check_agent(settings))
     checks += list(_check_safety(settings))
+    checks += list(_check_perception(settings))
     if network:
         checks += list(_check_network(settings))
     else:
