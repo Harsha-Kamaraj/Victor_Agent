@@ -323,6 +323,39 @@ def test_navigating_to_a_folder_is_not_the_act_it_is_named_after(label):
     assert classify("click", {"index": 1, "label": label}, mutating=True).risk is Risk.SAFE
 
 
+@pytest.mark.parametrize(
+    "label", ["setup.exe", "install.msi", "script.ps1", "run.bat", "Victor.app", "thing.cmd"]
+)
+def test_clicking_a_file_that_would_run_asks_first(label):
+    """Invoke on an Explorer list item opens the file - setup.exe installs."""
+    verdict = classify("click", {"index": 4, "label": label}, mutating=True)
+    assert verdict.risk is Risk.CONFIRM
+    assert "runs it" in verdict.reason
+
+
+@pytest.mark.parametrize(
+    "label", ["notes.txt", "report.pdf", "photo.png", "data.csv", "index.html"]
+)
+def test_clicking_a_document_stays_silent(label):
+    """Opening a document in a viewer is the ordinary case."""
+    assert classify("click", {"index": 4, "label": label}, mutating=True).risk is Risk.SAFE
+
+
+def test_a_filename_with_spaces_is_still_a_filename():
+    """Real files have spaces, and missing one is the expensive direction.
+
+    A button whose label ends the same way - "Open setup.exe" - is caught too,
+    which is correct rather than merely tolerable: it also runs the thing.
+    """
+    from victor.safety.classify import executable_label
+
+    assert executable_label("Setup Wizard.exe") == "exe"
+    assert executable_label("Open setup.exe") == "exe"
+    assert executable_label("Downloads") == ""
+    assert executable_label("README.md") == ""
+    assert executable_label("Version 2.0") == ""
+
+
 def test_a_right_click_opens_a_menu_rather_than_doing_what_the_label_says():
     """Whatever gets picked from the menu is classified when it is clicked."""
     verdict = classify("click", {"index": 1, "label": "Delete", "button": "right"}, mutating=True)

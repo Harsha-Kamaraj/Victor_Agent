@@ -340,6 +340,44 @@ _CONSEQUENTIAL_LABEL = re.compile(
 )
 
 
+#: Extensions whose files *run* when opened rather than being displayed.
+#:
+#: This exists because "clicking navigates the interface" is not true in a file
+#: manager. UI Automation's Invoke on an Explorer list item is a double click:
+#: it opens the file with its default handler, so clicking `setup.exe` installs
+#: something. A document opening in a viewer is the ordinary case and stays
+#: silent; a file that executes is worth one question.
+EXECUTABLE_SUFFIXES = frozenset(
+    {
+        # Windows
+        "exe", "msi", "msix", "appx", "bat", "cmd", "com", "scr", "pif",
+        "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta",
+        "reg", "lnk", "inf", "cpl", "jar",
+        # macOS
+        "app", "command", "pkg", "dmg", "scpt", "sh", "tool",
+    }
+)
+
+_FILENAME = re.compile(r"^(?P<stem>[^\\/:*?\"<>|]+)\.(?P<suffix>[A-Za-z0-9]{1,8})$")
+
+
+def executable_label(label: str) -> str:
+    """The suffix if this label ends in a file that would run, else ``""``.
+
+    Spaces are allowed in the stem, because real files have them - "Setup
+    Wizard.exe" is a file, and missing it would be the expensive mistake. The
+    cost of the other direction is one confirmation on a button whose label
+    happens to end that way, and those turn out to be buttons like "Open
+    setup.exe" and "Run install.msi", where confirming is the right answer
+    anyway.
+    """
+    match = _FILENAME.match(label.strip())
+    if match is None:
+        return ""
+    suffix = match.group("suffix").lower()
+    return suffix if suffix in EXECUTABLE_SUFFIXES else ""
+
+
 def classify_click(arguments: dict) -> Classification:
     """Classify a click by what its label says it does."""
     label = str(arguments.get("label", "")).strip()
@@ -353,6 +391,15 @@ def classify_click(arguments: dict) -> Classification:
         # classified then. Asking about a right click on "Delete" would be
         # asking about the wrong action.
         return Classification(Risk.SAFE, "opens a context menu")
+
+    suffix = executable_label(label)
+    if suffix:
+        return Classification(
+            Risk.CONFIRM,
+            f"{label} is a .{suffix} - clicking it in a file manager runs it, "
+            "and nothing here can read what it does",
+            target,
+        )
 
     match = _CONSEQUENTIAL_LABEL.search(label)
     if match:
