@@ -1,362 +1,522 @@
-# Victor — build plan
+# Victor Agent — Implementation Plan
 
-Nine phases, each with an exit gate. A phase is done when its gate demonstrably
-passes, not when the code is written. Gates are written as things you can watch
-happen, because that is the only definition that survives a demo.
+> **This document is the plan of record**, written by [@Gagan-1718](https://github.com/Gagan-1718)
+> before implementation began. It is kept as authored, with phase headings ticked
+> as their exit gates pass and short *as-built* notes where reality diverged.
+>
+> **Build status: P0–P3 complete, P4–P8 outstanding.**
+> What was actually built, why it differs, and the measured numbers live in
+> [BUILD-LOG.md](BUILD-LOG.md) — that file is the record of execution, this one
+> is the record of intent. Read this first.
+>
+> Implementation lives at
+> [Harsha-Kamaraj/Victor_Agent](https://github.com/Harsha-Kamaraj/Victor_Agent).
 
-Phases are units of execution, not days. The original sketch was six days; the
-sequencing below is what actually matters.
+## Context
+
+Build **Victor**, an autonomous voice-driven Computer-Use & Developer AI agent, at `C:\Users\jssps\victor-agent`.
+
+**Locked decisions:**
+- Budget: **strictly $0** — free tiers only, no credit card
+- Purpose: **portfolio / resume showcase** — optimize for a credible demo + README, not general robustness
+- Desktop control: **UIA accessibility tree first, VLM fallback**
+- Scope: voice, dev/shell + HITL safety, desktop GUI, RAG memory, plus `victor scout` as a secondary feature
+- Cross-cutting: session tracing + replay, global kill switch + reversible action journal
+
+**Verified environment** (checked, not assumed): Python 3.14.5, Node 24.11, git 2.51, Intel Core Ultra 7 255H (16 cores), 31.5 GB RAM, Intel Arc 140T iGPU (**no CUDA** — CPU/ONNX only). All wheels resolve on 3.14: `faiss-cpu` 1.14.3, `fastembed` 0.8.0, `onnxruntime` 1.28.0, `google-genai` 2.14.0, `groq` 1.6.0, `mss` 10.2.0, `uiautomation` 2.0.29, `piper-tts` 1.6.0, `webrtcvad` 2.0.10, `typer`, `pydantic` 2.13. No `pipx`/`uv`, but `Python314\Scripts` is on PATH.
 
 ---
 
-## Dependency graph
+## How this plan is organized
+
+Phases are **units of execution and integration**, not calendar days. Each phase is a
+thing that either works or doesn't — you can stop between phases and the system is in a
+coherent state.
+
+Every phase declares:
+
+- **Consumes** — what must already exist for this phase to be buildable
+- **Exposes** — the contract later phases depend on
+- **Exit gate** — a concrete, verifiable check. **Do not start the next phase until it passes.** This is the single most important discipline in the plan; it's what keeps a five-pillar project from collapsing into five half-finished ones.
+
+Effort is marked **S / M / L** (a few hours / half a day / a full day or more) rather than
+assigned to dates. The whole thing is roughly 5–6 days of focused work, but the phase is
+the unit of progress — pace them however your week actually goes.
+
+**Dependency graph:**
 
 ```
-P0 ─┬─> P1 ──> P2 ──> P3 ──> P5 ──> P6 ──> P7 ──> P8
-    └─> P4 ───────────────────┘
+P0 Skeleton ──┬──> P1 Voice I/O ──┐
+              │                   ├──> P2 Agent Core ──> P3 Safety ──┐
+              │                   │                                  │
+              │   (P1 optional — P2 works headless via --text)       ├──> P5 Actuation
+              │                                                      │        │
+              └──> P4 Perception ────────────────────────────────────┘        │
+                                                                              ▼
+                                                    P6 Memory ──> P7 Scout ──> P8 Ship
 ```
 
-P4 is read-only — it observes the screen and changes nothing — so it is the one
-phase safe to build out of order or in parallel. Everything that *acts* (P5)
-waits behind the safety layer (P3), never the other way round.
+**P4 (Perception) is read-only and depends only on P0** — build it in parallel with P1–P3
+if you want a change of pace, or pull it forward if voice tuning gets frustrating. It is
+the only phase with that freedom; everything else is genuinely sequential.
 
 ---
 
-## P0 · Skeleton & Plumbing ✅
+## Honest note on scope
 
-Nothing here is interesting on its own. It exists so that every later phase has
-somewhere to put its config, its spending, and its evidence.
+The original estimates summed to 11–17 days of solo human work. Compressing to ~6 comes
+from two places, and only one is free:
 
-**Built**
-- `config.py` — env + `.env`, secrets held as `SecretStr` so they can't be
-  logged by accident.
-- `quota.py` — the free-tier ledger. Normalises requests/min, requests/day,
-  tokens/min, tokens/day and audio-seconds/day across providers whose daily
-  windows reset in different timezones. Persisted, atomic, thread-safe.
-- `providers/` — the routing table plus a `Router` that picks the best model a
-  workload can currently afford. Selection is pure: no network, fully testable.
-- `tracing.py` — one JSONL file per session, append-only, flushed per event so
-  a killed process still leaves a readable trace.
-- `doctor.py` / `cli.py` — `victor doctor`, `quota`, `route`, `models`, `trace`.
+1. **Code generation speed** — scaffolding, API clients, schemas, CLI wiring. Real, but covers maybe half the gap.
+2. **Scope cuts** — the rest, listed explicitly under "What the compressed scope costs you." Nothing here is achieved by optimism.
 
-**Exit gate** — `victor doctor` reports honestly on a machine with no keys;
-`victor route vision` visibly falls through from Gemini to Groq once the ledger
-says 250/250 is spent. ✅
-
-**Design note.** The ledger reserves a request *before* the call and reconciles
-real token counts *after*. A crash mid-call therefore over-counts by one
-request. That direction of error is deliberate: over-counting costs a little
-headroom, under-counting costs money.
+**P5 is the schedule risk.** UIA behaviour on real applications is unpredictable and is the
+one thing that can consume a day without warning. Mitigation is baked in: a fixed set of
+known-good target apps rather than "any app."
 
 ---
 
-## P1 · Voice I/O ✅
+## Reality corrections baked into this plan
 
-**Built**
-- `voice/audio.py` — one representation end to end: int16 mono PCM at a
-  declared rate, plus WAV encode/decode, dBFS and resampling.
-- `voice/sources.py` — `AudioSource` protocol. `MicrophoneSource` for
-  PortAudio, `ArraySource` for tests and benchmarks. This split is why the
-  entire endpointing and transcription stack is testable with no audio
-  hardware.
-- `voice/vad.py` — `EnergyVad` (default) and an optional `WebRtcVad`, under an
-  `Endpointer` state machine with hysteresis, pre-roll and guard rails.
-- `voice/stt.py` — Groq Whisper, routed and metered.
-- `voice/tts.py` — Piper ONNX with streaming playback; system and null backends.
-- `voice/pipeline.py`, `voice/bench.py` — composition and measurement.
-- CLI: `victor listen`, `say`, `voice devices`, `voice install`, `bench voice`.
+These override the original architecture sketch. Each was verified against current sources.
 
-**Exit gate** — real microphone capture (2.00 s at 16 kHz, verified), real
-Piper synthesis played through real speakers, and measured p50/p95 published
-below rather than asserted. ✅
+| Original claim | Reality | Design response |
+|---|---|---|
+| "Groq Whisper via WebSockets" | Groq STT is **HTTP file upload only**; no streaming socket exists | VAD segments utterances locally, POSTs each chunk. WebSockets are internal (HUD ↔ core) only |
+| "Sub-500ms voice pipeline" | Voice→shell ≈ 600–900 ms. Voice→**vision**→act→speak ≈ **2–6 s** | Publish a real measured latency table. Never claim 500 ms end-to-end |
+| "Continuous live screen capture" | Gemini Flash free tier ≈ **10 RPM / ~250 requests per day** (per-account now; Google cut free quotas 50–80% in Dec 2025) | **On-demand capture only.** Hard quota ledger. UIA handles most actions at zero API cost |
+| "edge-tts for voice output" | Recurring **403 blocks** from Microsoft through 2026 | **Piper** (local ONNX neural TTS) primary, `pyttsx3`/SAPI5 fallback. Fully offline |
+| VLM predicts click coordinates | Pixel-coordinate clicking on Windows is unreliable (off-by-30px, wrong control) — this is where these projects die | **UIA gives exact element names + rects**, locally, ~20 ms, free. Agent picks by ID |
 
-### Three decisions that changed the design
+### Further corrections, found while building
 
-**WebRTC VAD was dropped as a dependency.** `webrtcvad` 2.0.10 imports
-`pkg_resources`, which setuptools 81+ removed, so it fails at import on a
-current install. Putting that on the critical path of a voice agent is not
-worth it. Victor ships an adaptive energy detector instead — a running noise
-floor that only adapts on non-speech frames, so a long utterance cannot drag
-the threshold up over itself. WebRTC remains available as an opt-in backend.
+The table above was verified before implementation. These four only surfaced once
+code ran, and each changed a decision above:
 
-**The noise floor is clamped.** If the mic opens while the user is already
-talking — routine in push-to-talk — calibration measures speech, the floor
-lands at speech level, and the VAD goes permanently deaf. Capping the floor at
--35 dBFS trades a slightly trigger-happy threshold for never failing to hear.
+| Plan said | Building it showed | Response |
+|---|---|---|
+| `webrtcvad` 2.0.10 resolves on 3.14 | The wheel installs but **fails at import**: it does `import pkg_resources`, which setuptools 81+ removed | Victor ships its own adaptive energy VAD. WebRTC stays an opt-in backend. An unmaintained C extension is not worth putting on a voice agent's critical path |
+| Use the `groq` and `google-genai` SDKs | Groq is OpenAI-compatible, so one thin `httpx` client covers chat *and* STT and swaps provider by URL | Raw `httpx`. Two fewer dependencies, and `MockTransport` makes the whole provider layer testable without a network |
+| `victor = "victor.cli:app"` | Typer's `app` object cannot catch `VictorError` for a tidy exit code | `victor.cli:main`, a wrapper that maps expected failures to exit codes |
+| Python 3.14 verified | True on the target Windows box. On macOS, Homebrew's 3.13/3.14 link `pyexpat` against keg-only `expat` and **pip does not work at all** | Development on macOS uses 3.13 with `DYLD_LIBRARY_PATH` set — see BUILD-LOG. Windows is unaffected |
 
-**The end-of-turn silence is trimmed before upload.** Ending a turn takes
-700 ms of silence, and Whisper bills by audio duration. Uploading the pause
-that proved the user stopped talking would spend ~15% of the audio budget on
-nothing. Only a 200 ms tail is kept, enough to avoid clipping a final
-consonant.
+---
 
-### Measured on this machine
+## The $0 architecture: split-brain routing
 
-MacBook Air (Apple Silicon), Python 3.13.14, `victor bench voice --runs 7`:
+The core engineering idea that makes a strict-free-tier build viable. **Free tiers differ
+wildly in generosity — route each workload to whichever can afford it.**
+
+| Workload | Provider | Free allowance | Why |
+|---|---|---|---|
+| **Text reasoning** (ReAct loop, tool choice, safety adjudication) | Groq `openai/gpt-oss-120b` | ~1,000–14,400 req/day, 30 RPM, ~300 TPS | Fast and abundant. Carries ~90% of all calls |
+| **Vision** (only when UIA is insufficient) | Gemini 2.5 Flash → fallback Groq Llama-4-Scout | ~250/day → +~1,000/day | Scarcest resource. Spent only when earned |
+| **STT** | Groq `whisper-large-v3-turbo` | 28,800 audio sec/day, 2,000 req/day | Separate quota pool from chat — effectively free |
+| **TTS** | Piper (local ONNX) | Unlimited | Offline, ~100 ms, nothing to break |
+| **Embeddings** | `fastembed` (local ONNX) | Unlimited | Offline |
+| **UI perception** | Windows UIA tree | Unlimited | Local, ~20 ms, zero cost |
+| **Repo data** | GitHub REST API | 5,000 req/hr authenticated | Ample |
+
+**Zero-torch stack.** `fastembed` + `piper` + `webrtcvad` are ONNX or native C, avoiding a
+~2.5 GB CPU-only torch download that buys nothing without CUDA.
 
 ```
-stage                                  runs        p50        p95  unit
-vad endpointing                           7        0.1        0.1  ms/s audio
-tts model load (once)                     1      525.6      525.6  ms
-tts time-to-first-audio (1 sentence)      7       75.5      132.9  ms
-tts synthesis (1 sentence)                7       75.5      132.9  ms
-tts time-to-first-audio (3 sentences)     7       42.1       46.8  ms
-tts synthesis (3 sentences)               7      108.5      112.8  ms
-tts realtime factor (3 sentences)         7      0.036      0.037  x
+[Mic] → webrtcvad → utterance .wav → Groq Whisper (STT)
+                                          │
+                                          ▼
+                    ┌──── ReAct loop (Groq gpt-oss-120b) ────┐
+                    │                                        │
+             [UIA tree: free]                        [FAISS RAG recall]
+                    │                                        │
+          tree sufficient? ──no──> [mss capture → Gemini Flash]  ← quota ledger
+                    │ yes                                     (fallback: Groq Scout)
+                    ▼
+          [Safety Interceptor: ALLOW / CONFIRM / DENY]   ←── kill switch aborts any stage
+                    │
+        ┌───────────┴───────────┐
+        ▼                       ▼
+   [ EXECUTE via journal ]   [ spoken confirm + dry-run preview ]
+        └───────────┬───────────┘
+                    ▼
+          [Piper TTS] + [HUD]        ── every step appended to session trace ──
 ```
 
-**Piper chunks per sentence.** For a one-sentence reply, time-to-first-audio
-*is* the full synthesis time and streaming buys nothing; across three
-sentences it drops from 108 ms to 42 ms. The benchmark reports both rather
-than averaging the distinction away. The practical consequence for P2: replies
-should be written as several short sentences, not one long one.
-
-**Not yet measured:** STT round trip and the full voice→voice loop, both of
-which need a live `GROQ_API_KEY`. `victor bench voice --stt` measures them and
-spends real audio quota doing it. Windows numbers are also outstanding — the
-figures above are macOS.
-
 ---
 
-## P2 · Agent Core ✅
-
-**Built**
-- `tools/base.py` — tool contract, registry, and the interceptor seam.
-- `tools/shell.py`, `tools/git.py` — `shell`, `read_file`, `git`.
-- `agent/llm.py` — chat client for the text tier, with token reconciliation
-  and fall-through on 429.
-- `agent/loop.py` — the ReAct loop and its budgets.
-- `agent/prompts.py` — system prompt, plus the STT vocabulary bias.
-- CLI: `victor do`, `victor converse`, `victor tools`.
-
-**Exit gate** — "what branch am I on and what changed?" drove three real `git`
-invocations (`rev-parse`, `log`, `status`) against this repository in sequence,
-each result fed back before the next decision, answered in 4 steps and 580
-tokens. ✅
-
-### Budgets are the design
-
-A free tier of ~1,000 requests a day and 8,000 tokens a minute means an
-unbounded loop does not hang, it ends the day. Three limits, all reported in
-the result rather than silently applied:
-
-- **Step cap** — default 8 think-act cycles.
-- **Token budget** — default 20,000 per task.
-- **Repetition guard** — identical consecutive tool calls are refused with a
-  message telling the model to try something else. A stuck model will
-  otherwise spend the entire allowance repeating one mistake, and this is the
-  single cheapest protection against that.
-
-Tool output is truncated at the tool boundary, head and tail kept, because one
-noisy `git log` can exceed the per-minute token budget on its own. The failure
-mode without it is not a clean error — it is the agent losing the earlier half
-of its own conversation.
-
-### A 429 outranks the ledger
-
-Declared free-tier numbers are conservative but providers change them silently.
-When the API returns 429, the client marks that model spent for the day and
-retries down the chain *mid-task*. Covered by test: first request goes to
-`gpt-oss-120b`, the 429 sends the second to `llama-3.3-70b`, and the run still
-answers.
-
-### Model mistakes are results, not exceptions
-
-Unknown tool names, malformed JSON arguments, wrong kwargs, blocked calls — all
-come back as failed `ToolResult`s the model can read and correct on the next
-step. An exception would end a run that was one message away from recovering.
-
-### Still missing, and stated in the product
-
-`victor tools` and `victor doctor` both say out loud that the P3 interceptor
-does not exist yet and that mutating tools currently run behind only a
-denylist. That denylist (`rm -rf`, `mkfs`, `dd` to a device, fork bombs,
-curl-pipe-to-shell, force push) is a guard against an obvious model mistake,
-**not** a security boundary, and it is documented as such in
-`src/victor/tools/shell.py`.
-
----
-
-## P3 · Safety & Reversibility ✅
-
-The gate for everything that touches the machine. Built *before* actuation, not
-bolted on after.
-
-**Built**
-- `safety/classify.py` — every call graded safe / confirm / deny.
-- `safety/confirm.py` — typed and spoken confirmation, both failing closed.
-- `safety/journal.py` — append-only record with undo recipes where an inverse
-  exists, and an explicit reason where one does not.
-- `safety/killswitch.py` — cooperative abort with three checkpoints.
-- `safety/interceptor.py` — the piece that slots into P2's seam.
-- CLI: `victor check`, `victor journal list`, `victor journal undo`,
-  `--dry-run` and `--yes` on `victor do`.
-
-**Exit gate**, measured rather than asserted:
-
-| claim | result |
-| --- | --- |
-| `rm -rf` refused without confirmation | refused; the target file survived |
-| confirmed once approved | asked once, ran, file removed |
-| recorded in the journal | both the refusal and the execution, with undo status |
-| kill switch stops a task inside 200 ms | **26 ms** — a `sleep 30` returned in 0.43 s |
-
-### Two rules that pull against each other
-
-**Fail closed.** Anything not recognised as read-only needs confirmation. A
-classifier that guesses "probably fine" is worse than none, because it teaches
-the user that the prompt means nothing.
-
-**Avoid alarm fatigue.** If everything prompts, users stop reading and start
-saying yes, and the safety layer becomes a latency tax that protects nobody. So
-the read-only set is generous and specific — the commands a developer runs
-dozens of times an hour pass silently — and confirmations within one session
-are remembered rather than re-asked on every retry.
-
-### The denylist was too wide, and that was a safety bug
-
-The first implementation refused *every* `rm -rf`. Running the exit gate showed
-why that is wrong: `rm -rf build` and `rm -rf node_modules` are routine, so a
-permanent block makes ordinary cleanup impossible and pushes users toward
-`--yes`, which disables confirmation for everything else too. A refusal users
-route around is worse than a confirmation they read.
-
-`DENY` is now reserved for damage with no recovery path — the filesystem root,
-the whole home directory, a drive letter, a bare `*`, `mkfs`, `dd` to a device.
-Everything else destructive is confirmed and journalled. `rm -rf ~` and
-`rm -rf ~/` are both caught: a pattern that catches only one spelling of a
-disaster catches neither in practice.
-
-### The journal is honest about undo
-
-Most side effects have no inverse. `rm` does not, and neither does anything
-that reached the network. Entries carry either a real recipe or an explicit
-reason there is none, and the confirmation prompt says which *before* the user
-answers:
+## Repo layout
 
 ```
-This cannot be undone: deleted files cannot be restored.
+victor-agent/
+  pyproject.toml            .env.example       README.md
+  victor/
+    cli.py                  # typer entry point
+    config.py               # pydantic-settings from .env
+    bus.py                  # asyncio event bus + state machine
+    llm/
+      router.py             # split-brain provider routing
+      budget.py             # persistent daily quota ledger
+      schemas.py            # pydantic tool-call contracts
+    voice/  mic.py  vad.py  stt.py  tts.py  hotkey.py
+    agent/  loop.py  prompts.py  tools.py
+    desktop/ uia.py  capture.py  actions.py  vision.py
+    dev/    shell.py  git_tools.py
+    safety/
+      interceptor.py        # ALLOW / CONFIRM / DENY, pre-execution gate
+      rules.py  dryrun.py
+      killswitch.py         # global panic hotkey, aborts mid-action
+      journal.py            # reversible file ops + undo
+    trace/  recorder.py  replay.py
+    rag/    store.py  embed.py  ingest.py  recall.py
+    scout/  github.py  corpus.py  analyze.py
+    ui/     hud.py           # minimal always-on-top status strip
+  tests/                    scripts/
 ```
 
-Presenting a plausible-looking undo would be worse than none, because it would
-encourage approving a delete on the belief it can be walked back. Confirmation
-is the protection for irreversible actions; undo is a convenience for the rest.
+### As built
 
-One bug found by test and worth recording: the `git add` inverse was
-`git reset HEAD <paths>`, which fails with *ambiguous argument 'HEAD'* in a
-repository with no commits — exactly the `git init && git add .` case. It is
-now `git reset -- <paths>`, which works in both. An undo offered in a prompt
-that would not have worked is the same class of failure the design exists to
-prevent.
+The architecture landed as planned; the naming drifted. Recorded here so the two
+documents agree rather than quietly disagreeing:
 
-### The kill switch is cooperative
+| Planned | As built | Why |
+|---|---|---|
+| `victor/` at repo root | `src/victor/` | src-layout: tests import the installed package, not the working tree, so a broken `pyproject.toml` fails loudly instead of passing on a stale path |
+| `llm/router.py`, `llm/budget.py`, `llm/schemas.py` | `providers/router.py`, `quota.py`, `providers/base.py` | The ledger is not LLM-specific — it meters audio seconds too, so it sits above the provider layer |
+| `dev/shell.py`, `dev/git_tools.py` | `tools/shell.py`, `tools/git.py` | `tools/` also holds the registry and the interceptor seam, which are not dev-specific |
+| `agent/tools.py` | `tools/` package | Outgrew one module once the registry, contract and safety seam were in it |
+| `trace/recorder.py`, `trace/replay.py` | `tracing.py` | One file, 195 lines. Splitting it would be structure without content |
+| `safety/rules.py` | `safety/classify.py` | Same role; the name says what it produces |
+| `safety/dryrun.py` | folded into `safety/interceptor.py` | Dry-run is one branch of the same decision, not a separate policy |
+| `voice/mic.py` | `voice/sources.py` | Holds the `AudioSource` protocol plus mic *and* array sources — the split that makes the stack testable without hardware |
+| `voice/hotkey.py` | `safety/killswitch.py` | The hotkey exists to abort; it belongs with the thing it aborts |
+| `bus.py` (asyncio event bus + state machine) | **not built** | The loop is synchronous and call-stack-shaped. An event bus would be indirection with no second consumer yet; revisit if the P8 HUD needs to observe live state |
 
-A `SIGKILL` mid-run would lose the journal entry for the action in flight,
-which is the one you would most want to keep. So tripping the switch sets a
-flag and three checkpoints observe it: between loop steps, before a tool runs,
-and inside the shell tool's wait loop — the last is what bounds abort latency
-by the 50 ms poll interval rather than by whatever the command decided to do.
-
-The first Ctrl-C stops the run cleanly; a second one interrupts for real, so a
-wedged process is still escapable. In `victor converse`, saying "stop" trips
-the same switch. A truly global hotkey needs an OS-level hook and a macOS
-permissions prompt; it is opt-in via `pynput` and, like push-to-talk, the
-system-wide binding lands with the HUD in P8.
+Unbuilt directories from the plan — `desktop/`, `rag/`, `scout/`, `ui/` — belong to
+P4–P8 and are absent rather than stubbed, so `victor doctor` can report them as
+`PENDING` instead of half-present.
 
 ---
 
-## P4 · Screen Perception *(parallelizable)*
+## Install & CLI surface
 
-**Build** — Windows UI Automation tree reader producing indexed, filtered
-elements with names, control types and bounding boxes. Screen capture via `mss`.
-Vision only as a fallback for surfaces with no usable tree (canvas apps, remote
-desktops, images).
-
-**Exit gate** — dump the tree of File Explorer, Edge, Settings and VS Code in
-under 100 ms each, with every actionable element addressable by index.
-
-Read-only by construction: this phase cannot click anything.
-
----
-
-## P5 · Desktop Actuation
-
-**Build** — click, type, focus, scroll, driven by UIA element handles rather
-than coordinates. Every action routed through P3's interceptor.
-
-**Exit gate** — "open Settings and turn on dark mode" completes hands-free,
-with no coordinate guessing in the trace.
-
----
-
-## P6 · Memory
-
-**Build** — FAISS index over `fastembed` vectors. Error tracebacks and their
-eventual fixes are captured automatically from the agent loop, not typed in by
-hand. Recall injects prior fixes into context when a traceback resembles one
-already seen.
-
-**Exit gate** — hit the same error twice; the second run cites the first fix.
-
----
-
-## P7 · Scout
-
-**Build** — GitHub portfolio gap analysis reusing P6's embedding stack.
-
-**Exit gate** — point it at a profile, get back specific, non-generic gaps.
-
----
-
-## P8 · Surface & Ship
-
-**Build** — HUD, the real benchmark table, test pass, demo recording.
-
-**Exit gate** — README's latency numbers are measured on this machine and match
-what the demo visibly does.
-
----
-
-## Deliberately cut
-
-Each of these was considered and dropped, with the reason, so they don't get
-silently re-added later:
-
-- **Always-on wake word.** 250 vision requests/day cannot support a continuous
-  loop, and a wake word without a safety layer is how you get an agent that
-  acts on the television. Push-to-talk instead.
-- **Pixel-coordinate clicking as the primary path.** It is the thing this
-  project exists to avoid. Vision stays a fallback.
-- **Multi-agent planner/critic split.** Doubles token spend against a 1,000
-  req/day budget to fix a problem a single-model ReAct loop has not yet shown.
-- **Cross-platform support.** UI Automation is a Windows API. macOS AX and
-  Linux AT-SPI would be a second perception backend, not a port.
-- **A fine-tuned local model.** No GPU is part of the promise. Everything is
-  ONNX or a free API.
-- **Browser automation via CDP.** Would work better than UIA inside the browser,
-  but it is a second actuation stack serving one app family.
-
----
-
-## Development environment
-
-Victor targets Windows. The core — config, quota, routing, tracing, agent loop,
-memory — is platform-neutral and developed and tested on macOS and Linux too.
-P4/P5 import `uiautomation`, which is Windows-only and declared behind a
-`sys_platform == 'win32'` marker; on other platforms `victor doctor` reports
-desktop control as unavailable rather than pretending.
-
-```bash
-python3.13 -m venv .venv
-.venv/bin/python -m pip install -e ".[dev]"
-.venv/bin/python -m pytest
+```toml
+[project.scripts]
+victor = "victor.cli:app"
 ```
 
-**macOS + Homebrew Python caveat.** Homebrew's `python@3.13`/`3.14` link
-`pyexpat` against keg-only `expat`, which breaks `pip` with a missing
-`_XML_SetAllocTrackerActivationThreshold` symbol. Work around it with
-`export DYLD_LIBRARY_PATH=/opt/homebrew/opt/expat/lib`. Separately, macOS may
-set the `UF_HIDDEN` flag on files in `site-packages`, and Python 3.13 skips
-hidden `.pth` files — which silently breaks editable installs. `pytest` is
-configured with `pythonpath = ["src"]` so the suite is immune; for the CLI, run
-`PYTHONPATH=src .venv/bin/python -m victor` or `chflags nohidden` the `.pth`.
+```powershell
+cd C:\Users\jssps\victor-agent
+py -3.14 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e .
+victor doctor
+```
+
+**Global access without activating the venv.** No `pipx`/`uv` present, but
+`C:\Users\jssps\AppData\Local\Programs\Python\Python314\Scripts` is already on PATH.
+`victor install-shim` writes a `.cmd` there pointing at the venv interpreter.
+
+| Command | Does | Arrives in |
+|---|---|---|
+| `victor doctor` | Verify keys, mic, speakers, UIA access, quota | P0 |
+| `victor quota` | Today's remaining free-tier budget per provider | P0 |
+| `victor install-shim` | Put `victor` on the global PATH | P0 |
+| `victor bench [--voice]` | Measured p50/p95 latency table | P1 |
+| `victor run` | Start the agent — push-to-talk voice loop + HUD | P2 |
+| `victor run --text "..."` | Skip the mic, drive by typed prompt (**used constantly**) | P2 |
+| `victor run --dry-run` | Full loop, nothing executes | P2 |
+| `victor undo [--last N]` | Revert file ops from the action journal | P3 |
+| `victor sessions` / `victor replay <id>` | List / step through recorded traces | P3 |
+| `victor uia --dump` | Print the focused window's element tree, zero API calls | P4 |
+| `victor index <path>` / `victor recall "<q>"` | FAISS memory ingest / query | P6 |
+| `victor scout --user <handle>` | GitHub portfolio gap report | P7 |
+
+**Kill switch:** `Ctrl+Alt+Esc` (configurable) — a global hook, live whenever `victor run` is active, not a CLI command.
+
+---
+
+# Phases
+
+## Prerequisites (~30 min, your side)
+
+Not a build phase, but P0 stalls without it.
+
+1. **Groq API key** — console.groq.com, free, no card
+2. **Gemini API key** — aistudio.google.com, free, no card. While there, **note your actual rate limits** on the AI Studio rate-limit page; they're per-account and this plan's numbers are typical, not guaranteed
+3. **GitHub PAT** — classic token, `public_repo` + `read:user`
+4. A working mic and speakers
+
+Keys go in `.env` (git-ignored).
+
+---
+
+## P0 — Skeleton & Plumbing · **M**  ✅ **shipped**
+
+**Goal:** nothing user-visible works yet, but everything later hangs off this. Get it right and the rest is assembly.
+
+**Consumes:** nothing.
+**Exposes:** `config`, `budget.can_spend()`, `router.complete()`, `trace.record()`, a CLI that runs.
+
+**Build:**
+- `pyproject.toml`, venv, editable install, `install-shim`
+- `config.py` — pydantic-settings. **Every free-tier limit is config, never hardcoded** — these numbers change without notice
+- `llm/budget.py` — JSON ledger at `~/.victor/quota.json`; per-provider daily counters, midnight reset, `can_spend(provider) -> bool`
+- `llm/router.py` — split-brain routing with fallback chain. **The single choke point for every API call**, so quota accounting can't be bypassed by a later module
+- `llm/schemas.py` — pydantic tool-call contracts
+- **`trace/recorder.py`** — built now, not later. Every run appends to `logs/sessions/<id>.jsonl`: utterance, ReAct steps, tool calls + args, safety verdicts, per-step latency, provider/tokens/quota. Benchmarks, replay, debugging, and the README's cost numbers all read this one format. Retrofitting instrumentation across five modules later costs far more than writing it now
+- `bus.py` — asyncio event bus + state machine (IDLE / LISTENING / THINKING / ACTING / CONFIRMING / SPEAKING)
+- `cli.py` — `doctor`, `quota`, `install-shim`, stubs for the rest
+
+**Exit gate:** `victor doctor` runs from a fresh terminal and prints an all-green table — three keys valid, mic and speakers enumerated, UIA reachable, quota ledger readable. `victor quota` shows today's budget.
+
+---
+
+## P1 — Voice I/O · **L**  ✅ **shipped**
+
+**Goal:** you speak, Victor speaks back. A closed loop with no intelligence in it yet.
+
+**Consumes:** P0 (config, router, trace).
+**Exposes:** `listen() -> str`, `speak(text)`. Everything downstream treats voice as a solved I/O layer and never touches audio again.
+
+**Build:**
+- `voice/mic.py` — `sounddevice`, 16 kHz mono, 20 ms frames, ring buffer
+- `voice/vad.py` — `webrtcvad`, ~300 ms hangover, emits complete utterances
+- `voice/stt.py` — Groq `whisper-large-v3-turbo`, retry + backoff
+- `voice/tts.py` — Piper ONNX (`en_US-lessac-medium`, one-time download), `pyttsx3`/SAPI5 fallback
+- `voice/hotkey.py` — push-to-talk (the default; a hot mic burns quota and invites false triggers)
+- `victor bench --voice`
+
+**Exit gate:** speak a sentence, hear it echoed back. `victor bench --voice` prints p50/p95 per leg — expect STT 300–600 ms, TTS ~100 ms. Numbers come from real traces, not stopwatch guesses.
+
+**Watch for:** VAD threshold tuning against your room noise is the likely time sink here. Timebox it — push-to-talk means it never blocks progress, and `--text` mode (P2) means voice is never on the critical path for development.
+
+---
+
+## P2 — Agent Core & Tool Execution · **L**  ✅ **shipped**
+
+**Goal:** Victor first becomes an *agent* — it reasons, picks a tool, and runs it.
+
+**Consumes:** P0 (router, trace). P1 optional — `--text` mode works headless.
+**Exposes:** the tool registry. **Every later capability registers here**, which is why the registry contract matters more than any individual tool.
+
+**Build:**
+- `agent/loop.py` — ReAct loop on Groq structured/JSON tool calling; max-step cap, full transcript, cancel-on-interrupt
+- `agent/tools.py` — registry auto-generating JSON schemas from pydantic models
+- `agent/prompts.py` — system prompt, tool descriptions, few-shot examples
+- `dev/shell.py` — `subprocess` with timeout, captured streams, cwd management
+- `dev/git_tools.py` — status, diff, branch, commit, push
+- `victor run`, `--text`, `--dry-run`
+
+**Exit gate:** `victor run --text "list the files in my Downloads folder and tell me the largest"` completes a multi-step ReAct loop and answers correctly. Then the same by voice.
+
+**Spike this first — before writing the loop:** confirm Groq `openai/gpt-oss-120b` handles strict JSON tool-calling reliably. If it doesn't, fall back to Llama-4-Scout or Qwen3-32B. A 30-minute check that prevents discovering a foundational problem three phases later.
+
+---
+
+## P3 — Safety & Reversibility · **M**  ✅ **shipped**
+
+**Goal:** Victor becomes safe to actually let loose. This is not a feature — it's a wrapper around everything P2 can do, and everything P5 will add.
+
+**Consumes:** P2 (wraps the tool registry).
+**Exposes:** an execution gate every tool call passes through, plus abort and undo.
+**P5 depends on this existing first.** Do not give an agent mouse and keyboard control before the kill switch works.
+
+**Build:**
+- **`safety/interceptor.py`** — three layers, evaluated in order:
+  1. **DENY** — `rm -rf /`, `format`, `diskpart`, fork bombs, writes to `C:\Windows`, force-push to a default branch
+  2. **CONFIRM** — any delete, admin elevation, network writes, `git push`, repo deletion, >N file mutations
+  3. **LLM adjudication** (Groq, cheap) for anything unmatched — **fails closed to CONFIRM** on error or timeout
+- `safety/dryrun.py` — renders what *would* happen (files matched, diff preview) and speaks a summary before executing
+- **`safety/killswitch.py`** — the interceptor gates actions *before* they run; this stops one *already running*. Global `Ctrl+Alt+Esc` hook on its own thread sets an abort event polled by the ReAct loop, subprocess runner, and desktop executor. Kills the child process **tree**, releases held keys/mouse buttons, cancels pending API calls, speaks "stopped". `pyautogui.FAILSAFE` (mouse to a screen corner) is a second, dependency-free trigger
+- **`safety/journal.py`** — deletes become moves to `~/.victor/trash/<session>/`; overwrites snapshot the original first. Each entry records its inverse, so `victor undo` replays backward. 7-day retention, size-capped
+- `trace/replay.py` + `victor sessions` / `victor replay`
+- `tests/test_safety.py` — the highest-value tests in the repo
+
+**Exit gate:** all four must pass.
+1. *"Delete every log file in Downloads"* → speaks the file count, waits for a spoken "yes"
+2. Long-running task + `Ctrl+Alt+Esc` → stops in ~200 ms, no orphaned processes, no stuck modifier keys
+3. Delete files, then `victor undo` → restored byte-identical
+4. `pytest tests/test_safety.py` green — every DENY rule blocks, unmatched input fails closed, abort reaps the process tree
+
+**Verify in the first 30 minutes:** that the global hotkey registers **without elevation**. A kill switch that needs admin is not a kill switch. If `keyboard` misbehaves, swap to `pynput` immediately.
+
+---
+
+## P4 — Screen Perception · **L** *(parallelizable — needs only P0)*
+
+**Goal:** Victor can *see*. Read-only, so it's safe to build and test in isolation at any point.
+
+**Consumes:** P0 only.
+**Exposes:** `get_elements() -> list[Element]` and `capture()`. P5 consumes both.
+
+**Build:**
+- **`desktop/uia.py`** — walk the UI Automation tree of the focused window, filter to interactable controls, emit a compact numbered list; cache per window handle, invalidate on focus change
+
+```
+[3]  Button  "Compose"      (24,180)-(140,220)
+[7]  Edit    "Search mail"  (300,60)-(900,100)
+[12] Button  "Settings"     (1400,60)-(1440,100)
+```
+
+- `desktop/capture.py` — `mss` capture, downscale to ~768 px longest edge, **perceptual-hash cache** so an unchanged screen never re-bills a VLM call
+- `desktop/vision.py` — **fallback only**, for surfaces with no usable tree (canvas, games, poor Electron trees). Annotates the screenshot with numbered boxes over UIA rects (Set-of-Mark) and asks the VLM to pick a **number, not a coordinate**. Checks `budget.can_spend()` first; degrades gracefully with a spoken *"I'm out of vision quota for today"*
+
+**Exit gate:** `victor uia --dump` prints a usable element list for each target app — File Explorer, Edge/Chrome, Windows Settings, VS Code — with **zero API calls**. Separately, force the vision fallback on a canvas surface and confirm it returns a valid element choice and decrements the quota ledger.
+
+---
+
+## P5 — Desktop Actuation · **L** ⚠️ *schedule risk — the big integration*
+
+**Goal:** *"Victor, open Gmail and search for invoices from last month"* works. This is where P2, P3, and P4 meet.
+
+**Consumes:** P2 (registry), P3 (safety gate — **mandatory**, not optional), P4 (perception).
+**Exposes:** the demo.
+
+**Build:**
+- `desktop/actions.py` — `click_element(id)`, `type_text`, `hotkey`, `scroll`, `focus_window`, `open_app`. All operate on UIA handles, **never raw pixels**; every file-touching action routes through the journal
+- Register desktop tools in the P2 registry, behind the P3 interceptor
+- Instrument API calls per task so the trace shows the zero-cost ratio
+
+**Exit gate:** two multi-step GUI tasks completed by voice, end to end, with `victor replay` showing how many steps used **zero** API calls. The kill switch must still abort cleanly mid-click.
+
+**Scope guard — this is what keeps P5 from swallowing the project:** target **File Explorer, Edge/Chrome, Windows Settings, VS Code**. These have good trees. Do not chase universal app support — that's an open-ended research problem, not a phase. If a target app's tree is poor, **swap the app rather than fight it**.
+
+---
+
+## P6 — Memory · **M**
+
+**Goal:** Victor remembers past fixes and stops repeating diagnostic work.
+
+**Consumes:** P2 (hooks the shell error path), P0 (trace).
+**Exposes:** `recall(query)` injected into agent context; the embedding stack P7 reuses.
+
+**Build:**
+- `rag/embed.py` — `fastembed` with `BAAI/bge-small-en-v1.5` (~130 MB ONNX, CPU)
+- `rag/store.py` — FAISS `IndexFlatIP` + SQLite sidecar for metadata/text
+- `rag/ingest.py` — `victor index <path>` chunks project files. **Auto-capture hook:** when a shell command exits non-zero and a later one succeeds, store the `(traceback → fix)` pair. This is what makes the memory grow by itself instead of needing to be curated
+- `rag/recall.py` — top-k retrieval injected into agent context on every error
+
+**Exit gate:** trigger the same traceback twice. The second time Victor recalls the prior fix instantly, **offline, with zero API calls** — confirmed in the trace.
+
+---
+
+## P7 — Scout · **S**
+
+**Goal:** GitHub portfolio gap analysis. A secondary feature, deliberately — not a second product.
+
+**Consumes:** P6 (embedding + store, reused wholesale — no new infrastructure).
+**Exposes:** `victor scout`.
+
+**Build:**
+- `scout/github.py` — authenticated REST client; user repos, languages, topics, READMEs
+- `scout/corpus.py` — comparison corpus via **GitHub Search API** (`stars:>N pushed:>date` across topics). *Honest framing: GitHub has no official "trending" API — this is a heuristic, and the README says so plainly rather than dressing it up as science*
+- `scout/analyze.py` — cosine distance, ranked gaps, **each row citing the specific repos that produced it** so the output is checkable rather than vague
+
+**Exit gate:** `victor scout --user <handle>` prints and speaks a ranked gap report where every row names its supporting evidence.
+
+**Cut-line:** if P5 overran, **this is the first thing to drop.** P6 stays — it carries the "learns from its errors" story.
+
+---
+
+## P8 — Surface & Ship · **M**
+
+**Goal:** it looks finished, and every claim is backed by a number.
+
+**Consumes:** everything. Reads P0's traces for all published figures.
+
+**Build:**
+- `ui/hud.py` — minimal always-on-top status strip: state, live transcript, **live quota counter**. The quota counter *is* the story. A status strip, not a UI framework — do not rabbit-hole into PyQt
+- **README** — architecture diagram, real measured benchmark table, GIFs, and an explicit **"What this can't do"** section. That section buys more credibility than any feature
+- `victor bench` full-pipeline table, regenerated from session traces
+- Round out `tests/` — interceptor, kill switch, journal, UIA parsing, quota rollover
+- **Demo video, 90 seconds, 4 scenarios:** (1) voice → shell, HITL block, then `victor undo`; (2) desktop GUI navigation with the quota counter barely moving; (3) error → RAG recall, offline; (4) kill switch stopping a task mid-action
+
+Session traces make recording easy: rehearse until one run is clean, then record that run.
+
+**Exit gate:** a stranger can clone the repo, follow the README, and reach `victor doctor` all-green without asking you anything.
+
+---
+
+## What the compressed scope costs you
+
+Stated plainly so these stay decisions, not surprises:
+
+- **Targeted app support, not universal** — UIA tuned for 4 named apps. Others may work; not guaranteed
+- **Demo-grade, not production-grade** — the four scenarios are solid; the long tail isn't hardened
+- **Tests concentrated on safety** — interceptor, kill switch, journal, quota. Not broad coverage
+- **Minimal HUD** — status strip only
+- **`victor scout` is single-shot** — no caching or iterative refinement
+- **No eval harness** — deferred; P0's tracing is its prerequisite, so it can be added any time later
+- **No streaming TTS** — ~300 ms of felt latency left on the table
+- **No wake word** — push-to-talk only
+
+---
+
+## Verification
+
+Per-phase gates, cumulative — later phases must not break earlier ones:
+
+```powershell
+victor doctor                          # P0 — env, keys, devices, quota green
+victor quota                           # P0
+victor bench --voice                   # P1 — p50/p95 per leg
+victor run --text "..."                # P2 — multi-step ReAct completes
+victor run --dry-run                   # P2 — full loop, nothing executes
+pytest tests/test_safety.py -v         # P3 — DENY blocks; unmatched fails closed
+victor undo --last 1                   # P3 — byte-identical restore
+victor uia --dump                      # P4 — element list, zero API calls
+victor index . ; victor recall "ModuleNotFoundError"   # P6
+victor scout --user <handle>           # P7
+victor sessions ; victor replay <id>   # any phase — trace complete and readable
+pytest -v                              # P8 — full suite
+```
+
+**Manual end-to-end (run after P5, repeat after P8):**
+1. *"Create a folder called victor-test on my desktop"* → executes, confirms by voice
+2. *"Delete everything in my Documents folder"* → **must** stop, request spoken confirmation, show a dry-run count
+3. **Kill switch:** multi-step task + `Ctrl+Alt+Esc` → stops ~200 ms, no orphaned processes, no stuck modifier keys
+4. **Undo:** delete, then `victor undo` → files restored byte-identical
+5. Kill network mid-task → degrades gracefully, speaks the failure, no crash
+6. Exhaust Gemini quota deliberately → falls back to Groq vision, then UIA-only, announcing each step
+7. All of the above reproduce under `victor replay` — **if a failure isn't reproducible from its trace, the tracing is incomplete**
+
+---
+
+## Risk register
+
+| Risk | Likelihood | Mitigation |
+|---|---|---|
+| **P5 UIA quirks eat the schedule** | **High** | Fixed target app list; swap apps rather than fight trees; P7 is the designated cut |
+| Gemini ~250/day quota hit during a heavy session | High | Split-brain routing, pHash cache, Groq vision fallback, UIA-first. The ledger makes the ceiling visible instead of surprising |
+| Global hotkey needs elevation → kill switch silently dead | Medium | Verify in P3's first 30 min; `pyautogui.FAILSAFE` is the backup trigger; swap to `pynput` if needed |
+| Kill switch fires but a child process survives | Medium | Kill the process **tree**, not the direct child; asserted in tests |
+| Groq model's JSON tool-calling too weak for ReAct | Medium | P2 opening spike; fall back to Llama-4-Scout / Qwen3-32B |
+| VAD false triggers on background noise | Medium | Push-to-talk default; `--text` mode means voice never blocks development |
+| Piper download / ONNX issue on 3.14 | Low | `pyttsx3`/SAPI5 fallback always present |
+| Free-tier terms change mid-build | Medium | All limits in `config.py`; providers swappable behind `llm/router.py` |
+
+---
+
+## What makes this a blockbuster
+
+Most "computer use agent" repos are flaky VLM-coordinate demos that break on the second
+run and quietly cost money. Victor's real differentiators:
+
+1. **Runs on $0/day and proves it** — live quota counter in the HUD, documented split-brain routing table
+2. **UIA-first hybrid control** — deterministic clicks, ~20 ms, no pixel guessing; VLM spend only when earned
+3. **Honest measured benchmarks** — a real latency table beats an inflated "sub-500ms" claim every time
+4. **Safety that fails closed** — DENY rules, a kill switch that stops mid-action, reversible file ops, tests proving all three
+5. **Observable** — every run is a replayable trace. Almost no portfolio agent repo has this, and it's what an experienced reviewer notices first
+
+**One-sentence pitch:** *A voice-driven computer-use agent for Windows that runs entirely on free API tiers — because it reads the accessibility tree instead of guessing pixels.*
+
+---
+
+## Deliberately deferred
+
+Recorded so these stay decisions rather than oversights:
+
+- **Eval harness (`victor eval`)** — scripted task suite producing a success-rate number. High credibility value; unblocked by P0's tracing, so it can be added any time after P8
+- **Streaming TTS** — speak sentence one while the rest generates
+- **Gemini Live API** — would collapse STT+VLM+TTS into one stream, but its free tier is too thin
+- **Wake word** — an always-hot mic burns quota and invites false triggers
+- **Gemini built-in computer-use tool** — check free-tier availability later; an optional enhancement, never a dependency

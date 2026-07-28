@@ -2,7 +2,9 @@
 
 A voice-driven computer-use agent for Windows that runs entirely on free API tiers — because it reads the accessibility tree instead of guessing pixels.
 
-**Status: P0–P3 complete.** Plumbing, voice I/O, the agent core, and the safety layer are built and tested. Everything below the P3 line is not implemented yet, and `victor doctor` says so out loud rather than reporting a green tick for a pipeline that does not exist. See [docs/PLAN.md](docs/PLAN.md) for the full plan, including the parts that were deliberately cut.
+**Status: P0–P3 complete.** Plumbing, voice I/O, the agent core, and the safety layer are built and tested. Everything below the P3 line is not implemented yet, and `victor doctor` says so out loud rather than reporting a green tick for a pipeline that does not exist.
+
+Two documents, deliberately separate: [docs/PLAN.md](docs/PLAN.md) is the plan of record — what was intended, why, and what was deliberately cut. [docs/BUILD-LOG.md](docs/BUILD-LOG.md) is what actually happened, including the decisions that changed during implementation and the measured numbers.
 
 ## What it will do
 
@@ -105,7 +107,7 @@ Stated upfront rather than discovered later:
 Requires Python 3.13+ (developed on 3.13 and 3.14).
 
 ```powershell
-git clone https://github.com/Gagan-1718/Victor_Agent.git
+git clone https://github.com/Harsha-Kamaraj/Victor_Agent.git
 cd Victor_Agent
 py -3.13 -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -171,7 +173,11 @@ A plausible-looking undo would be worse than none — it would encourage approvi
 
 **The kill switch is cooperative, not a `SIGKILL`** — killing mid-write would lose the journal entry for the action in flight, which is the one you would most want. Ctrl-C, or saying "stop" during `victor converse`, trips a flag that three checkpoints observe: between loop steps, before a tool runs, and inside the shell wait loop. Measured abort latency on a running `sleep 30`: **26 ms**.
 
-Developing on macOS or Linux is supported for everything except P4/P5 — see the [development environment notes](docs/PLAN.md#development-environment), which include the Homebrew `pyexpat` and macOS hidden-`.pth` workarounds.
+Developing on macOS or Linux is supported for everything except P4/P5 — see the [development environment notes](docs/BUILD-LOG.md#development-environment), which include the Homebrew `pyexpat` and macOS hidden-`.pth` workarounds.
+
+## Credits
+
+Architecture and implementation plan by [@Gagan-1718](https://github.com/Gagan-1718) — the split-brain routing idea, the UIA-over-pixels bet, and the phase structure with exit gates all come from [docs/PLAN.md](docs/PLAN.md). Implementation by [@Harsha-Kamaraj](https://github.com/Harsha-Kamaraj).
 
 ## License
 

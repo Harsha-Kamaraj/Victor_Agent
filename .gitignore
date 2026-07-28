@@ -1,4 +1,10 @@
-# Python
+# --- secrets ---
+.env
+.env.local
+*.pem
+*.key
+
+# --- python ---
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -8,21 +14,25 @@ dist/
 .venv/
 venv/
 
-# Tooling
+# --- tooling ---
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
 .coverage
 htmlcov/
 
-# Secrets and local state
-.env
-.env.local
-.victor/
+# --- victor runtime artifacts ---
+.victor/           # quota ledger, traces, journal (VICTOR_DATA_DIR)
+logs/
+*.jsonl            # traces and the action journal
+models/            # piper voice + fastembed onnx downloads
+index/             # faiss index + sqlite sidecar
+screenshots/
 
-# Models downloaded at runtime (Piper voices, fastembed ONNX)
-models/
-
-# OS
+# --- os / editor ---
 .DS_Store
 Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/settings.json
