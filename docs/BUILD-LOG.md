@@ -341,9 +341,27 @@ could call**.
 `tools/desktop.py` (seven tools), classification rules for clicks and
 shortcuts, `victor click` and `victor press`.
 
-**Exit gate** — the actuation half is verified live on macOS; the voice half
-still needs an API key and the two-task GUI run needs an unlocked screen. What
-did run is below.
+**Exit gate** — two multi-step GUI tasks completed end to end on macOS, through
+the real tool registry, the P3 interceptor and the journal, with the model taken
+out of the loop. **12 of 12 tool calls spent zero quota; 0 API calls, 0 tokens.**
+The voice leg still needs an API key.
+
+```
+TASK 1 - Calculator: 12 x 12, by clicking
+  click  ok=True cost=0 accessibility  pressed '1'
+  ... six clicks, every one via AXPress ...
+  display -> ['12×12', '144']
+
+TASK 2 - TextEdit: select all, replace, save
+  screen_read ok=True cost=0            7 elements
+  press_keys  ok=True cost=0 synthetic  pressed cmd+a
+  type_text   ok=True cost=0 synthetic  typed 28 characters
+  press_keys  ok=True cost=0 synthetic  pressed cmd+s
+  disk after: 'Victor typed this during P5.'   <- verified on disk
+
+SAFETY     one confirmation, on 'Delete': "delete is not something I can undo"
+KILL SWITCH tripped mid-task -> next click blocked before it ran
+```
 
 ### Act on the control, not on its pixels
 
@@ -393,6 +411,34 @@ fields — but anything handling `keyDown:` itself sees one keystroke and drops
 the rest. Calculator was sent `8*8` and displayed `8`. Now each character is its
 own event, 4 ms apart. A silently truncated string is a worse failure than a
 slow one, and this one was silent.
+
+### Modifier flags leak onto the next keystroke
+
+The one that cost the most to find, because every layer reported success while
+nothing happened.
+
+`press_keys("mod+a")` worked. `type_text("Victor…")` immediately afterwards
+typed nothing, and reported "typed 28 characters" — which was true; the events
+were posted. On macOS a newly created `CGEvent` **inherits the window server's
+current modifier state**, so once a chord has set the Command flag, every event
+made afterwards carries it. Each letter of "Victor" arrived as ⌘V, ⌘i, ⌘c, ⌘t,
+⌘o, ⌘r — six menu shortcuts instead of a word.
+
+```
+inherited flags on a new event: 0x20100000     <- Command, still set
+type WITHOUT clearing flags:  'before\n'       <- nothing
+type WITH CGEventSetFlags(0): 'B'              <- typed
+```
+
+`release_modifiers` was originally a no-op on macOS, with a comment explaining
+that flags ride on each event so nothing can be held. That was exactly backwards
+— nothing is *held*, and the state persists anyway. It now posts a key-up for
+each modifier keycode with no flags set, chord key-ups carry no flags, and
+`type_text` clears them on every event. Three places, because the failure is
+silent and any one of them being missed brings it back.
+
+This also explains the earlier "it works on Calculator but not TextEdit"
+confusion: the Calculator runs typed *before* pressing any chord.
 
 ### The terminal hole
 
@@ -449,12 +495,16 @@ user and the model.
 
 ### Still outstanding
 
-- The two-task GUI exit gate needs an unlocked screen; it has not been run end
-  to end with the model in the loop, because there is still no API key.
+- The exit gate ran through the tool registry, not through the model — there is
+  still no API key, so no run has gone voice → LLM → click end to end.
 - `WindowsActuator` has never executed. It is ~120 lines with no branching, and
   everything above it is tested — but "compiles and mirrors the macOS one" is
-  not "works". `victor click --dry-run`, then `victor click`, on File Explorer
-  is the smoke test.
+  not "works", and the modifier-flag bug above is a reminder of what that gap
+  hides. `victor click --dry-run`, then `victor click`, on File Explorer is the
+  smoke test.
+- Windows has the same class of problem waiting: `PressKey`/`ReleaseKey` hold
+  *real* keys rather than setting flags, so the `finally` in `WindowsActuator.key`
+  is load-bearing in a way its macOS counterpart is not.
 
 ---
 

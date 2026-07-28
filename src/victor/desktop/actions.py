@@ -21,7 +21,10 @@ the wrong thing" failures.
 **Modifiers are always released.** A crash between key-down and key-up leaves
 Ctrl held on the user's machine, which is a far worse outcome than a failed
 action - every subsequent keystroke becomes a shortcut. Releases happen in a
-``finally``, and the abort path runs them too.
+``finally``, and the abort path runs them too. On macOS "held" is subtler than
+a key being down: the window server's modifier *flags* are inherited by every
+newly created event, so a chord leaks onto whatever is posted next until the
+state is explicitly cleared. See :meth:`MacActuator.release_modifiers`.
 
 **Every action checks the kill switch first.** Stopping mid-task must actually
 stop, including between the two halves of a double click.
@@ -156,6 +159,7 @@ class MacActuator:
         self._quartz: Any = None
         self._services: Any = None
         self._workspace: Any = None
+        self._source: Any = None
 
     def _load(self) -> tuple[Any, Any]:
         if self._quartz is not None:
@@ -173,6 +177,17 @@ class MacActuator:
                 f"PyObjC is not installed ({exc}). pip install -e '.[desktop]'"
             ) from exc
         self._quartz, self._services, self._workspace = Quartz, ApplicationServices, NSWorkspace
+        # One HID event source, reused for every synthesised event, so what is
+        # posted is indistinguishable from a keyboard as far as the receiving
+        # application is concerned.
+        #
+        # A NULL source also works on everything tried here - this is not a
+        # workaround for a bug, and it was briefly mistaken for one while
+        # chasing a TextEdit failure that turned out to be a modal alert. It is
+        # kept because it is the conventional form, it costs one object per
+        # process, and "the event has no source" is one fewer difference to
+        # think about when an application does ignore an event.
+        self._source = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
         return Quartz, ApplicationServices
 
     def available(self) -> tuple[bool, str]:
@@ -261,12 +276,14 @@ class MacActuator:
         point = quartz.CGPointMake(float(x), float(y))
         # Move first. Menus and hover-activated controls open on the move, not
         # on the press, and clicking without moving misses them entirely.
-        move = quartz.CGEventCreateMouseEvent(None, quartz.kCGEventMouseMoved, point, kind)
+        move = quartz.CGEventCreateMouseEvent(
+            self._source, quartz.kCGEventMouseMoved, point, kind
+        )
         quartz.CGEventPost(quartz.kCGHIDEventTap, move)
 
         for click in range(1, count + 1):
             for event_type in (down, up):
-                event = quartz.CGEventCreateMouseEvent(None, event_type, point, kind)
+                event = quartz.CGEventCreateMouseEvent(self._source, event_type, point, kind)
                 # A double click is one click with a click-count of two, not two
                 # clicks - applications read this field to tell them apart.
                 quartz.CGEventSetIntegerValueField(event, quartz.kCGMouseEventClickState, click)
@@ -289,7 +306,13 @@ class MacActuator:
         # is a worse failure than a slow one.
         for character in text:
             for pressed in (True, False):
-                event = quartz.CGEventCreateKeyboardEvent(None, 0, pressed)
+                event = quartz.CGEventCreateKeyboardEvent(self._source, 0, pressed)
+                # Clear the flags explicitly. A new event *inherits the current
+                # global modifier state*, so after a chord like cmd+a every
+                # subsequent keystroke silently arrives as cmd+<key> - typing
+                # "Victor" into a document becomes six menu shortcuts, and the
+                # symptom is a tool that reports success while nothing happens.
+                quartz.CGEventSetFlags(event, 0)
                 quartz.CGEventKeyboardSetUnicodeString(event, 1, character)
                 quartz.CGEventPost(quartz.kCGHIDEventTap, event)
             time.sleep(KEYSTROKE_INTERVAL)
@@ -299,18 +322,22 @@ class MacActuator:
         quartz, _ = self._load()
         code, flags = keymap.mac_keycode(chord)
         # Modifiers ride on the event as flags rather than as separate key-down
-        # events, so there is no window in which a modifier can be left held.
-        for pressed in (True, False):
-            event = quartz.CGEventCreateKeyboardEvent(None, code, pressed)
-            quartz.CGEventSetFlags(event, flags)
+        # events, so no physical modifier key is ever left held. The key-up
+        # carries no flags, which is what a real keyboard does - release the
+        # key, then release the modifiers - and what stops the flags leaking
+        # onto whatever is posted next.
+        for pressed, carried in ((True, flags), (False, 0)):
+            event = quartz.CGEventCreateKeyboardEvent(self._source, code, pressed)
+            quartz.CGEventSetFlags(event, carried)
             quartz.CGEventPost(quartz.kCGHIDEventTap, event)
         time.sleep(0.02)
+        self.release_modifiers()
         return ActionResult(True, f"pressed {chord}", method="synthetic")
 
     def scroll(self, dx: int, dy: int) -> ActionResult:
         quartz, _ = self._load()
         event = quartz.CGEventCreateScrollWheelEvent(
-            None, quartz.kCGScrollEventUnitLine, 2, int(dy), int(dx)
+            self._source, quartz.kCGScrollEventUnitLine, 2, int(dy), int(dx)
         )
         quartz.CGEventPost(quartz.kCGHIDEventTap, event)
         return ActionResult(True, f"scrolled ({dx}, {dy}) lines", method="synthetic")
@@ -347,13 +374,30 @@ class MacActuator:
         time.sleep(SETTLE_SECONDS * 3)  # applications are slower than windows
         return ActionResult(True, f"launched {name}")
 
-    def release_modifiers(self) -> None:
-        """Nothing can be stuck - modifiers are never held down here.
+    #: Virtual keycodes of the modifier keys, for clearing the flag state.
+    _MODIFIER_KEYCODES = (55, 56, 58, 59, 63)  # cmd, shift, option, control, fn
 
-        Kept so the protocol is uniform and the Windows implementation, where
-        this is load-bearing, is not a special case at the call site.
+    def release_modifiers(self) -> None:
+        """Clear the window server's idea of which modifiers are down.
+
+        This method was originally a no-op, on the reasoning that flags ride on
+        each event so nothing can be left held. That was wrong in a way that
+        took a while to see: the *global* modifier state persists, and every
+        subsequently created event inherits it. After one cmd+a, a keystroke
+        that should type "V" arrives as cmd+V, and the tool reports success
+        while nothing appears.
+
+        Posting a key-up for each modifier with no flags set puts the state
+        back. It is harmless when nothing was held, which is why it runs
+        unconditionally rather than only after a chord.
         """
-        return None
+        if self._quartz is None:
+            return
+        quartz = self._quartz
+        for code in self._MODIFIER_KEYCODES:
+            event = quartz.CGEventCreateKeyboardEvent(self._source, code, False)
+            quartz.CGEventSetFlags(event, 0)
+            quartz.CGEventPost(quartz.kCGHIDEventTap, event)
 
 
 # --- Windows ---------------------------------------------------------------

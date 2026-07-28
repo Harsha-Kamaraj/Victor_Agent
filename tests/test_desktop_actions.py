@@ -308,6 +308,9 @@ def test_an_ordinary_click_does_not_ask():
         "Sign out",
         "Don't Save",
         "Factory reset",
+        # Met in the wild: TextEdit's "could not be autosaved" alert offers
+        # Save Anyway / Save As… / Revert, and Revert throws the edits away.
+        "Revert",
     ],
 )
 def test_a_consequential_button_asks_first(label):

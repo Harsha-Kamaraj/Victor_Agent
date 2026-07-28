@@ -334,7 +334,7 @@ _CONSEQUENTIAL_LABEL = re.compile(
     r"format|reset|restore\s+defaults|factory\s+reset|"
     r"shut\s*down|restart|log\s*out|sign\s*out|"
     r"empty\s+(the\s+)?(trash|bin)|move\s+to\s+(the\s+)?(trash|bin)|"
-    r"don'?t\s+save|overwrite|replace"
+    r"don'?t\s+save|don'?t\s+keep|revert|overwrite|replace"
     r")\b",
     re.I,
 )
