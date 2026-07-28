@@ -51,21 +51,27 @@ def build_registry(
     cwd: Path | None = None,
     interceptor: Interceptor | None = None,
     shell: bool = True,
+    kill_switch: object | None = None,
 ) -> ToolRegistry:
-    """The standard tool set.
+    """The standard tool set, gated by the safety interceptor.
 
-    ``settings.dry_run`` wraps the interceptor rather than disabling tools, so
-    a dry run still exercises the full loop - model, tool selection, arguments -
-    and only stops at the point of execution.
+    ``settings.dry_run`` is handled inside :class:`SafetyInterceptor` rather
+    than by disabling tools, so a dry run still exercises the full loop - model,
+    tool selection, arguments, classification - and stops only at execution.
     """
+    from ..safety import SafetyInterceptor, build_confirmer
+
     workdir = Path(cwd or Path.cwd())
-    chosen = interceptor or PermissiveInterceptor()
-    if settings.dry_run:
-        chosen = DryRunInterceptor(chosen)
+    chosen = interceptor or SafetyInterceptor(
+        confirmer=build_confirmer(),
+        kill_switch=kill_switch,
+        dry_run=settings.dry_run,
+        require_confirmation=settings.confirm_destructive,
+    )
 
     registry = ToolRegistry(chosen)
     if shell:
-        registry.register(ShellTool(cwd=workdir))
+        registry.register(ShellTool(cwd=workdir, kill_switch=kill_switch))
     registry.register(ReadFileTool(cwd=workdir))
     registry.register(GitTool(cwd=workdir))
     return registry

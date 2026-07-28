@@ -21,7 +21,7 @@ from victor.tools import (
     screen,
     truncate,
 )
-from victor.tools.base import MAX_OUTPUT_CHARS, PermissiveInterceptor
+from victor.tools.base import MAX_OUTPUT_CHARS
 
 # --- output framing -------------------------------------------------------
 
@@ -313,18 +313,24 @@ def test_git_marks_mutating_subcommands(repo: Path) -> None:
 
 
 def test_build_registry_has_the_expected_tools(settings: Settings, tmp_path: Path) -> None:
+    from victor.safety import SafetyInterceptor
+
     registry = build_registry(settings, cwd=tmp_path)
     assert registry.names == ["git", "read_file", "shell"]
-    assert isinstance(registry.interceptor, PermissiveInterceptor)
+    # P3 replaced the P2 placeholder: the real classifier now gates every call.
+    assert isinstance(registry.interceptor, SafetyInterceptor)
 
 
-def test_dry_run_setting_wraps_the_interceptor(tmp_path: Path) -> None:
+def test_dry_run_setting_reaches_the_interceptor(tmp_path: Path) -> None:
     dry = Settings(_env_file=None, VICTOR_DATA_DIR=str(tmp_path), VICTOR_DRY_RUN=True)
     registry = build_registry(dry, cwd=tmp_path)
 
-    assert isinstance(registry.interceptor, DryRunInterceptor)
-    assert not registry.run("shell", {"command": "echo hi"}).ok
-    assert registry.run("read_file", {"path": "nope"}).error  # reached the tool
+    assert registry.interceptor.dry_run is True
+    # Writes are previewed, reads still run - a dry run must still investigate.
+    blocked = registry.run("shell", {"command": "rm -r build"})
+    assert not blocked.ok
+    assert "would have run" in (blocked.error or "")
+    assert registry.run("shell", {"command": "echo hi"}).ok
 
 
 def test_shell_can_be_left_out(settings: Settings, tmp_path: Path) -> None:

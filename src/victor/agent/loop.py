@@ -26,6 +26,7 @@ from ..config import Settings
 from ..errors import VictorError
 from ..providers import Router
 from ..quota import QuotaLedger
+from ..safety.killswitch import Aborted
 from ..tools import ToolRegistry, ToolResult, build_registry, describe_environment
 from ..tracing import Trace
 from .llm import ChatClient, Reply, ToolCall
@@ -40,6 +41,7 @@ class Outcome(StrEnum):
     STEP_LIMIT = "step-limit"
     TOKEN_LIMIT = "token-limit"
     FAILED = "failed"
+    ABORTED = "aborted"
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +105,7 @@ class Agent:
         token_budget: int = DEFAULT_TOKEN_BUDGET,
         voice: bool = False,
         on_step: Callable[[Step], None] | None = None,
+        kill_switch: Any | None = None,
     ) -> None:
         self.settings = settings
         self.client = client
@@ -113,6 +116,7 @@ class Agent:
         self.token_budget = token_budget
         self.voice = voice
         self.on_step = on_step
+        self.kill_switch = kill_switch
         self.messages: list[dict[str, Any]] = []
 
     # -- conversation ------------------------------------------------------
@@ -142,6 +146,12 @@ class Agent:
 
         with self.trace.span("agent.run", task=task) as span:
             for index in range(1, self.max_steps + 1):
+                # Checkpoint one: never spend another request on a stopped run.
+                if self.kill_switch is not None and self.kill_switch.tripped:
+                    result.outcome = Outcome.ABORTED
+                    result.answer = "Stopped."
+                    break
+
                 if result.total_tokens >= self.token_budget:
                     result.outcome = Outcome.TOKEN_LIMIT
                     result.answer = (
@@ -154,6 +164,10 @@ class Agent:
                     reply = self.client.complete(
                         self.messages, tools=self.registry.schemas()
                     )
+                except Aborted:
+                    result.outcome = Outcome.ABORTED
+                    result.answer = "Stopped."
+                    break
                 except VictorError as exc:
                     result.outcome = Outcome.FAILED
                     result.error = str(exc)
@@ -172,7 +186,14 @@ class Agent:
                         self.on_step(result.steps[-1])
                     break
 
-                executed = self._execute(reply.tool_calls, recent_calls)
+                try:
+                    executed = self._execute(reply.tool_calls, recent_calls)
+                except Aborted:
+                    result.outcome = Outcome.ABORTED
+                    result.answer = "Stopped."
+                    result.steps.append(Step(index, reply))
+                    break
+
                 step = Step(index, reply, tuple(executed))
                 result.steps.append(step)
                 if self.on_step is not None:
@@ -206,6 +227,10 @@ class Agent:
         executed: list[tuple[ToolCall, ToolResult]] = []
 
         for call in calls:
+            # Checkpoint two: the model has chosen, but nothing has run yet.
+            if self.kill_switch is not None:
+                self.kill_switch.check()
+
             signature = str(call)
             if recent and recent[-1] == signature:
                 # Identical consecutive calls mean the model is stuck. Saying so
@@ -248,18 +273,38 @@ def build_agent(
     max_steps: int = DEFAULT_MAX_STEPS,
     voice: bool = False,
     registry: ToolRegistry | None = None,
+    kill_switch: Any | None = None,
+    confirmer: Any | None = None,
 ) -> Agent:
-    """Wire an agent with the standard router, tools and client."""
+    """Wire an agent with the standard router, tools, client and safety layer."""
+    from ..safety import ActionJournal, SafetyInterceptor, build_confirmer
+
     trace = trace or Trace.disabled()
     workdir = Path(cwd or Path.cwd())
     ledger = QuotaLedger(settings.paths.ensure().quota_file)
     router = Router(settings, ledger, on_select=trace.selection)
+
+    if registry is None:
+        journal = ActionJournal(settings.paths.journal_file, session=trace.session_id)
+        interceptor = SafetyInterceptor(
+            confirmer=confirmer or build_confirmer(),
+            kill_switch=kill_switch,
+            journal=journal,
+            trace=trace,
+            dry_run=settings.dry_run,
+            require_confirmation=settings.confirm_destructive,
+        )
+        registry = build_registry(
+            settings, cwd=workdir, interceptor=interceptor, kill_switch=kill_switch
+        )
+
     return Agent(
         settings,
         ChatClient(settings, router, trace=trace),
-        registry or build_registry(settings, cwd=workdir),
+        registry,
         trace=trace,
         cwd=workdir,
         max_steps=max_steps,
         voice=voice,
+        kill_switch=kill_switch,
     )

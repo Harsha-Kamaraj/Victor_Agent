@@ -17,6 +17,7 @@ import os
 import platform
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,8 @@ from .base import ToolResult, ToolSpec
 
 DEFAULT_TIMEOUT = 30.0
 MAX_TIMEOUT = 300.0
+POLL_INTERVAL = 0.05
+"""How often the wait loop checks the kill switch. Bounds abort latency."""
 
 #: Patterns refused outright until P3's classifier exists. Irreversible,
 #: system-wide, or a trivially recognisable mistake.
@@ -64,11 +67,13 @@ class ShellTool:
         timeout: float = DEFAULT_TIMEOUT,
         env: dict[str, str] | None = None,
         enabled: bool = True,
+        kill_switch: Any | None = None,
     ) -> None:
         self.cwd = Path(cwd or Path.cwd())
         self.timeout = timeout
         self.env = env
         self.enabled = enabled
+        self.kill_switch = kill_switch
         self.spec = ToolSpec(
             name="shell",
             description=(
@@ -131,46 +136,90 @@ class ShellTool:
         env = {**os.environ, **(self.env or {})}
         invocation = self._shell_for_platform()
 
+        if invocation is None:
+            argv: str | list[str] = command
+            use_shell = True
+        else:
+            executable, flags = invocation
+            argv = [executable, *flags, command]
+            use_shell = False
+
         try:
-            if invocation is None:
-                completed = subprocess.run(
-                    command,
-                    shell=True,
-                    cwd=workdir,
-                    env=env,
-                    capture_output=True,
-                    text=True,
-                    timeout=limit,
-                )
-            else:
-                executable, flags = invocation
-                completed = subprocess.run(
-                    [executable, *flags, command],
-                    cwd=workdir,
-                    env=env,
-                    capture_output=True,
-                    text=True,
-                    timeout=limit,
-                )
-        except subprocess.TimeoutExpired:
-            return ToolResult(
-                ok=False,
-                error=f"timed out after {limit:.0f}s",
-                metadata={"command": command, "timeout": limit},
+            process = subprocess.Popen(
+                argv,
+                shell=use_shell,
+                cwd=workdir,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
             )
         except OSError as exc:
             return ToolResult(ok=False, error=f"could not run: {exc}")
 
+        stdout, stderr, status = self._wait(process, limit, command)
+        if status == "aborted":
+            return ToolResult(
+                ok=False,
+                error="stopped by the kill switch",
+                output=stdout,
+                metadata={"command": command, "aborted": True},
+            )
+        if status == "timeout":
+            return ToolResult(
+                ok=False,
+                error=f"timed out after {limit:.0f}s",
+                output=stdout,
+                metadata={"command": command, "timeout": limit},
+            )
+
         return ToolResult(
-            ok=completed.returncode == 0,
-            output=completed.stdout,
-            error=completed.stderr or None,
+            ok=process.returncode == 0,
+            output=stdout,
+            error=stderr or None,
             metadata={
                 "command": command,
-                "exit_code": completed.returncode,
+                "exit_code": process.returncode,
                 "cwd": str(workdir),
             },
         )
+
+    def _wait(
+        self, process: subprocess.Popen, limit: float, command: str
+    ) -> tuple[str, str, str]:
+        """Wait for the process, checking the kill switch as we go.
+
+        Without the poll loop, aborting a run would still have to wait out
+        whatever the command felt like doing. Abort latency is bounded by the
+        poll interval instead of by the command.
+        """
+        if self.kill_switch is None:
+            try:
+                stdout, stderr = process.communicate(timeout=limit)
+                return stdout, stderr, "ok"
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = process.communicate()
+                return stdout, stderr, "timeout"
+
+        deadline = time.monotonic() + limit
+        while process.poll() is None:
+            if self.kill_switch.tripped:
+                process.terminate()
+                try:
+                    stdout, stderr = process.communicate(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    stdout, stderr = process.communicate()
+                return stdout, stderr, "aborted"
+            if time.monotonic() > deadline:
+                process.kill()
+                stdout, stderr = process.communicate()
+                return stdout, stderr, "timeout"
+            time.sleep(POLL_INTERVAL)
+
+        stdout, stderr = process.communicate()
+        return stdout, stderr, "ok"
 
 
 class ReadFileTool:

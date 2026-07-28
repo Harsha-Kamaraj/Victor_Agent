@@ -216,8 +216,19 @@ class ToolRegistry:
             )
 
         try:
-            return tool.run(**arguments)
+            result = tool.run(**arguments)
         except TypeError as exc:
             return ToolResult(ok=False, error=f"bad arguments for {name!r}: {exc}")
-        except VictorError as exc:
-            return ToolResult(ok=False, error=str(exc))
+        except VictorError:
+            # Aborts and other deliberate failures propagate: a kill switch that
+            # a tool could swallow into a failed result would not be a kill
+            # switch.
+            raise
+
+        # Tell the interceptor what actually happened, so it can journal the
+        # action and its undo recipe. Optional, so P2's simple interceptors
+        # stay valid.
+        note = getattr(self.interceptor, "note_execution", None)
+        if callable(note):
+            note(tool.spec, arguments, ok=result.ok)
+        return result
