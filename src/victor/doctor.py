@@ -49,15 +49,16 @@ def _check_runtime() -> Iterator[Check]:
     yield Check("python", Status.OK, ".".join(str(v) for v in sys.version_info[:3]))
 
     system = platform.system()
-    if system == "Windows":
+    if system in ("Windows", "Darwin"):
         yield Check("platform", Status.OK, f"{system} {platform.release()}")
     else:
         yield Check(
             "platform",
             Status.WARN,
-            f"{system} - desktop control unavailable",
-            hint="UI Automation is a Windows API. Voice, shell and memory work "
-            "here; screen perception and actuation do not.",
+            f"{system} - screen perception unavailable",
+            hint="Perception needs an accessibility backend: UI Automation on "
+            "Windows, the Accessibility API on macOS. Voice, shell, git, "
+            "safety and memory all work here.",
         )
 
 
@@ -135,16 +136,18 @@ def _check_dependencies() -> Iterator[Check]:
                 hint=f"pip install -e '.[{extra}]' when you reach that phase",
             )
 
-    if platform.system() == "Windows":
-        if find_spec("uiautomation") is None:
-            yield Check(
-                "deps uiautomation",
-                Status.SKIP,
-                "missing",
-                hint="pip install -e '.[desktop]'",
-            )
-        else:
-            yield Check("deps uiautomation", Status.OK, "installed")
+    backend_module, backend_label = {
+        "Windows": ("uiautomation", "uiautomation"),
+        "Darwin": ("ApplicationServices", "pyobjc"),
+    }.get(platform.system(), ("", ""))
+    if backend_module:
+        installed = find_spec(backend_module) is not None
+        yield Check(
+            f"deps {backend_label}",
+            Status.OK if installed else Status.SKIP,
+            "installed" if installed else "missing",
+            hint="" if installed else "pip install -e '.[desktop]'",
+        )
 
 
 def _check_network(settings: Settings, timeout: float = 6.0) -> Iterator[Check]:
@@ -313,22 +316,22 @@ def _check_perception(settings: Settings) -> Iterator[Check]:
     """P4: can Victor read the screen, and capture it if the tree is not enough."""
     from .desktop import ScreenCapture, TreeReader
 
-    ok, detail = TreeReader().available()
+    reader = TreeReader()
+    ok, detail = reader.available()
+    label = f"accessibility tree ({reader.backend.name})"
     if ok:
-        yield Check("UIA tree access", Status.OK, detail)
-    elif platform.system() == "Windows":
+        yield Check(label, Status.OK, detail)
+    elif platform.system() in ("Windows", "Darwin"):
         yield Check(
-            "UIA tree access",
+            label,
             Status.FAIL,
             detail,
-            hint="pip install -e '.[desktop]'",
+            hint="pip install -e '.[desktop]'"
+            if "not installed" in detail
+            else "try `victor uia --demo` to see the output shape",
         )
     else:
-        yield Check(
-            "UIA tree access",
-            Status.SKIP,
-            "Windows only - try `victor uia --demo` to see the output shape",
-        )
+        yield Check(label, Status.SKIP, detail)
 
     capture_ok, capture_detail = ScreenCapture.available()
     yield (

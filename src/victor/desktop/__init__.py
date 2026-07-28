@@ -5,6 +5,7 @@ key - that is P5, and it is gated behind the P3 safety layer. Keeping the two
 apart is why perception could be built and tested out of order.
 """
 
+from .ax import AXBackend, list_applications
 from .capture import (
     CaptureUnavailable,
     ScreenCapture,
@@ -20,12 +21,15 @@ from .uia import (
     PerceptionUnavailable,
     TreeReader,
     UIABackend,
+    UnsupportedBackend,
     WalkLimits,
     demo_tree,
+    select_backend,
 )
 from .vision import VisionAnswer, VisionClient, VisionUnavailable, annotate
 
 __all__ = [
+    "AXBackend",
     "Backend",
     "CaptureUnavailable",
     "Element",
@@ -38,6 +42,7 @@ __all__ = [
     "Snapshot",
     "TreeReader",
     "UIABackend",
+    "UnsupportedBackend",
     "VisionAnswer",
     "VisionClient",
     "VisionUnavailable",
@@ -46,5 +51,7 @@ __all__ = [
     "demo_tree",
     "hamming",
     "is_interesting",
+    "list_applications",
     "perceptual_hash",
+    "select_backend",
 ]

@@ -817,6 +817,13 @@ def uia(
     demo: Annotated[
         bool, typer.Option("--demo", help="Use the built-in fake tree instead of a real window.")
     ] = False,
+    app: Annotated[
+        str | None,
+        typer.Option("--app", help="Target an application by name instead of the frontmost."),
+    ] = None,
+    apps: Annotated[
+        bool, typer.Option("--apps", help="List applications that can be targeted.")
+    ] = False,
     limit: Annotated[int, typer.Option("--limit", "-n", help="Elements to show.")] = 60,
     refresh: Annotated[bool, typer.Option("--refresh", help="Bypass the cache.")] = False,
 ) -> None:
@@ -826,12 +833,28 @@ def uia(
     came from the operating system, locally, for free. Nothing was sent
     anywhere and no quota was spent.
     """
-    from .desktop import FakeBackend, PerceptionUnavailable, TreeReader, demo_tree
+    from .desktop import (
+        FakeBackend,
+        PerceptionUnavailable,
+        TreeReader,
+        demo_tree,
+        list_applications,
+    )
+
+    if apps:
+        names = list_applications()
+        if not names:
+            console.print("[dim]no targetable applications (or not supported here)[/dim]")
+            return
+        for name in names:
+            console.print(f"  {name}")
+        console.print(f"\n[dim]target one with: victor uia --app '{names[0]}'[/dim]")
+        return
 
     if not dump:
         console.print("[dim]--dump is the only mode so far; it is implied.[/dim]")
 
-    reader = TreeReader(FakeBackend(demo_tree())) if demo else TreeReader()
+    reader = TreeReader(FakeBackend(demo_tree())) if demo else TreeReader(app=app)
 
     ok, detail = reader.available()
     if not ok:

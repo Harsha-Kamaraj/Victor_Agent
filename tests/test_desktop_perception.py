@@ -424,3 +424,101 @@ def test_a_vision_call_is_charged(settings: Settings, tmp_path) -> None:
     client.locate("compose", a_shot(), a_snapshot())
 
     assert ledger.usage(GEMINI_25_FLASH.key)[0] == 1
+
+
+# --- cross-platform backend selection --------------------------------------
+
+
+def test_the_backend_matches_the_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows and macOS each get a real backend; anything else fails clearly."""
+    from victor.desktop import select_backend
+
+    monkeypatch.setattr("platform.system", lambda: "Windows")
+    assert select_backend().name == "uia"
+
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    assert select_backend().name == "ax"
+
+    monkeypatch.setattr("platform.system", lambda: "Linux")
+    backend = select_backend()
+    assert backend.name == "unsupported"
+    ok, detail = backend.available()
+    assert not ok
+    assert "Linux" in detail
+
+
+def test_an_unsupported_platform_fails_with_a_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rest of Victor works without perception - say so, do not crash."""
+    from victor.desktop import PerceptionUnavailable, UnsupportedBackend
+
+    backend = UnsupportedBackend("Plan9")
+    with pytest.raises(PerceptionUnavailable, match="Plan9"):
+        backend.focused_window()
+
+
+def test_ax_roles_map_onto_the_shared_vocabulary() -> None:
+    """One control-type vocabulary means the prompt and filter are OS-agnostic."""
+    from victor.desktop.ax import _map_role
+
+    assert _map_role("AXButton") == "Button"
+    assert _map_role("AXTextField") == "Edit"
+    assert _map_role("AXStaticText") == "Text"
+    assert _map_role("AXRow") == "ListItem"
+    # An unmapped role degrades to a readable name rather than being dropped.
+    assert _map_role("AXSomethingNew") == "SomethingNew"
+
+
+def test_window_buttons_get_their_canonical_names() -> None:
+    from victor.desktop.ax import SUBROLE_NAMES
+
+    assert SUBROLE_NAMES["AXCloseButton"] == "Close"
+    assert SUBROLE_NAMES["AXMinimizeButton"] == "Minimise"
+
+
+# --- deduplication ---------------------------------------------------------
+
+
+def test_duplicate_controls_are_listed_once() -> None:
+    """Chrome reports its bookmark bar under two parents; UIA does the same.
+
+    Two identical rows with different indices waste context and give the model
+    a choice with no right answer.
+    """
+    shared = Rect(0, 116, 1280, 150)
+    root = FakeNode(
+        "Window",
+        "Dupes",
+        Rect(0, 0, 1280, 800),
+        children=[
+            FakeNode(
+                "Group",
+                "Left",
+                Rect(0, 0, 640, 800),
+                children=[FakeNode("ToolBar", "Bookmarks", shared)],
+            ),
+            FakeNode(
+                "Group",
+                "Right",
+                Rect(640, 0, 1280, 800),
+                children=[FakeNode("ToolBar", "Bookmarks", shared)],
+            ),
+        ],
+    )
+    labels = [e.label for e in reader(root).snapshot()]
+    assert labels.count("Bookmarks") == 1
+
+
+def test_same_name_at_a_different_position_is_kept() -> None:
+    """Two OK buttons in two dialogs are genuinely two things."""
+    root = FakeNode(
+        "Window",
+        "Two dialogs",
+        Rect(0, 0, 800, 600),
+        children=[
+            FakeNode("Button", "OK", Rect(10, 10, 60, 30)),
+            FakeNode("Button", "OK", Rect(400, 10, 450, 30)),
+        ],
+    )
+    assert len([e for e in reader(root).snapshot() if e.label == "OK"]) == 2

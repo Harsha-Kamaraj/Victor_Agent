@@ -38,10 +38,15 @@ voice = [
     "numpy>=2.1",
     "piper-tts>=1.3",
 ]
-# P4/P5 - screen perception and desktop actuation (Windows only)
+
+# P4/P5 - screen perception and desktop actuation.
+# One backend per platform behind victor.desktop.Backend: UI Automation on
+# Windows, the Accessibility API on macOS. Both read the same tree shape.
 desktop = [
     "uiautomation>=2.0.20; sys_platform == 'win32'",
     "pywin32>=308; sys_platform == 'win32'",
+    "pyobjc-framework-ApplicationServices>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
     "mss>=10.0",
     "pillow>=11.0",
 ]

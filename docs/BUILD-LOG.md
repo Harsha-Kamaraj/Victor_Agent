@@ -414,3 +414,47 @@ set the `UF_HIDDEN` flag on files in `site-packages`, and Python 3.13 skips
 hidden `.pth` files — which silently breaks editable installs. `pytest` is
 configured with `pythonpath = ["src"]` so the suite is immune; for the CLI, run
 `PYTHONPATH=src .venv/bin/python -m victor` or `chflags nohidden` the `.pth`.
+
+---
+
+## Cross-platform perception *(added after P4)*
+
+The plan targeted Windows only, and the build log said so. That changed: the
+project is now developed on macOS and Windows at once, so perception had to
+work on both.
+
+It cost one new file. `desktop/ax.py` implements the same `Backend` protocol
+against the macOS Accessibility API, and `select_backend()` picks by platform.
+Nothing above the backend changed — indexing, filtering, bounding, caching,
+Set-of-Mark prompting and every test are untouched. That protocol was put in
+during P4 precisely so a second OS would be an addition rather than a rewrite,
+and it was.
+
+**Verified on real macOS windows**, not fakes: Chrome, Finder and System
+Settings all read correctly, with real names, rectangles and disabled states —
+Chrome's Forward button is correctly reported disabled when there is no forward
+history.
+
+Three things surfaced only by running it against real applications:
+
+**Real trees contain duplicates.** Chrome reports its bookmark bar and New Tab
+button under two parents, so the raw walk produced 124 elements where 49 were
+distinct. Two identical rows with different indices waste the context budget
+and give the model a choice with no right answer. The walk now dedupes on
+(control type, name, rectangle) — which helps Windows equally, since UIA does
+the same thing.
+
+**macOS names controls differently.** Where Windows gives a Name, macOS often
+gives an empty AXTitle and puts the label in AXDescription, AXHelp or the
+value. Window buttons have none of those — but they do have a subrole, so a
+close button is now "Close" rather than "<Button>".
+
+**Subrole must beat description.** Finder's zoom button describes itself as
+"this button also has an action to zoom the window". The canonical subrole name
+is what a person would say and what the model should match on, so it is tried
+first.
+
+macOS also differs in two ways worth knowing operationally: Accessibility
+permission is explicit and must be granted in System Settings, and the literal
+frontmost process is sometimes a helper with no windows — hence `--app` to
+target an application by name, and `--apps` to list them.

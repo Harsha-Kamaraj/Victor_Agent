@@ -221,8 +221,9 @@ class TreeReader:
         *,
         limits: WalkLimits | None = None,
         cache_ttl: float = 1.0,
+        app: str | None = None,
     ) -> None:
-        self.backend = backend or UIABackend()
+        self.backend = backend or select_backend(app=app)
         self.limits = limits or WalkLimits()
         self.cache_ttl = cache_ttl
         self._cache: tuple[Any, float, Snapshot] | None = None
@@ -255,6 +256,11 @@ class TreeReader:
         deadline = started + self.limits.max_seconds
 
         elements: list[Element] = []
+        # Real trees contain the same control twice: Chrome reports its bookmark
+        # bar under two parents, and UIA does the equivalent. Two identical rows
+        # with different indices waste the context budget and give the model a
+        # choice that has no right answer.
+        seen: set[tuple[str, str, int, int, int, int]] = set()
         truncated = False
         # Breadth-first: the controls a user would reach for sit near the top of
         # the tree, so if the walk is cut short the useful ones are already in.
@@ -274,7 +280,20 @@ class TreeReader:
                 self.backend.describe(node)
             )
 
-            if depth and is_interesting(control_type, name, node_rect):
+            fingerprint = (
+                control_type,
+                name,
+                node_rect.left,
+                node_rect.top,
+                node_rect.right,
+                node_rect.bottom,
+            )
+            if (
+                depth
+                and fingerprint not in seen
+                and is_interesting(control_type, name, node_rect)
+            ):
+                seen.add(fingerprint)
                 elements.append(
                     Element(
                         index=len(elements),
@@ -302,6 +321,59 @@ class TreeReader:
             duration_ms=(time.perf_counter() - started) * 1000,
             backend=self.backend.name,
         )
+
+
+def select_backend(*, app: str | None = None) -> Backend:
+    """The right tree reader for this operating system.
+
+    The plan targeted Windows only, and UI Automation is a Windows API - but the
+    information Victor needs is exposed by every desktop accessibility layer,
+    and the Backend protocol was put here so a second one would be an addition
+    rather than a rewrite. macOS is that second one.
+
+    An unsupported platform gets a backend that fails with a clear reason when
+    used, rather than an import error at start-up: the rest of Victor - voice,
+    shell, git, safety, memory - works fine without screen perception.
+    """
+    system = platform.system()
+    if system == "Windows":
+        return UIABackend()
+    if system == "Darwin":
+        from .ax import AXBackend
+
+        return AXBackend(app_name=app)
+    return UnsupportedBackend(system)
+
+
+class UnsupportedBackend:
+    """Placeholder for platforms with no perception backend."""
+
+    name = "unsupported"
+
+    def __init__(self, system: str) -> None:
+        self.system = system
+
+    def available(self) -> tuple[bool, str]:
+        return False, (
+            f"no accessibility backend for {self.system}. "
+            "Windows uses UI Automation and macOS uses the Accessibility API; "
+            "everything else in Victor works here, just not screen perception."
+        )
+
+    def _fail(self) -> Any:
+        raise PerceptionUnavailable(self.available()[1])
+
+    def focused_window(self) -> Any | None:
+        return self._fail()
+
+    def window_info(self, window: Any) -> tuple[str, str, Rect]:
+        return self._fail()
+
+    def children(self, node: Any) -> list[Any]:
+        return self._fail()
+
+    def describe(self, node: Any) -> tuple[str, str, Rect, bool, bool, str, str]:
+        return self._fail()
 
 
 def demo_tree() -> FakeNode:

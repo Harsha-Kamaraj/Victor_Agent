@@ -1,6 +1,6 @@
 # Victor Agent
 
-A voice-driven computer-use agent for Windows that runs entirely on free API tiers — because it reads the accessibility tree instead of guessing pixels.
+A voice-driven computer-use agent for **Windows and macOS** that runs entirely on free API tiers — because it reads the accessibility tree instead of guessing pixels.
 
 **Status: P0–P4 complete.** Plumbing, voice I/O, the agent core, the safety layer and screen perception are built and tested. Everything below the P4 line is not implemented yet, and `victor doctor` says so out loud rather than reporting a green tick for a pipeline that does not exist.
 
@@ -19,7 +19,7 @@ Victor listens, looks at your screen, and acts — hands-free.
 
 Most computer-use agent projects ask a vision model to predict click coordinates. On a real Windows desktop that means off-by-30px clicks, wrong buttons, and silent failures — and it burns a paid API call on every single step.
 
-Victor reads the Windows UI Automation tree instead. That gives exact element names and bounding boxes, locally, in ~20 ms, for free:
+Victor reads the operating system's own accessibility tree instead — UI Automation on Windows, the Accessibility API on macOS. That gives exact element names and bounding boxes, locally, in tens of milliseconds, for free:
 
 ```
 [3]  Button  "Compose"      (24,180)-(140,220)
@@ -40,7 +40,7 @@ Free tiers differ wildly in generosity, so each workload is routed to whichever 
 | Speech-to-text | Groq `whisper-large-v3-turbo` | 28,800 audio sec/day |
 | Text-to-speech | Piper (local ONNX) | unlimited, offline |
 | Embeddings | fastembed (local ONNX) | unlimited, offline |
-| UI perception | Windows UIA tree | unlimited, local |
+| UI perception | OS accessibility tree | unlimited, local |
 
 The whole stack is ONNX or native C — no torch, no CUDA, no GPU required.
 
@@ -99,7 +99,9 @@ Stated upfront rather than discovered later:
 - **Push-to-talk is terminal-scoped.** `victor listen --mode ptt` starts and stops on Enter. A system-wide hotkey needs an OS-level hook and lands with the HUD in P8.
 - **Not always-on.** The free vision tier is ~250 requests/day, so screen capture happens on demand, never as a continuous stream.
 - **Targeted app support.** UIA is tuned for File Explorer, Edge/Chrome, Windows Settings, and VS Code. Other apps may work but aren't guaranteed.
-- **Windows only.** UI Automation is a Windows API. The core (config, quota, routing, tracing, safety, memory) is platform-neutral and runs anywhere; only the thin UIA backend is Windows-bound. Everything above it — filtering, indexing, bounding, caching, rendering — is tested against a fake tree on any platform, and `victor uia --demo` shows the output shape.
+- **Windows and macOS, not Linux.** Perception needs an accessibility backend: UI Automation on Windows, the Accessibility API on macOS. Linux (AT-SPI) is not implemented. Everything else — voice, shell, git, safety, memory — is platform-neutral and runs anywhere.
+- **macOS needs permission.** Grant Accessibility to your terminal in System Settings → Privacy & Security → Accessibility, or the tree comes back empty. `victor doctor` says so plainly when it is missing.
+- **Actuation (P5) is still Windows-first.** Perception works on both today; clicking and typing does not exist yet on either.
 - **Free-tier numbers are declared, not discovered.** Providers change allowances without notice. The routing table in [src/victor/providers/registry.py](src/victor/providers/registry.py) states them conservatively, so Victor under-uses a generous tier rather than hitting a 429 mid-demo.
 
 ## Setup
@@ -132,6 +134,8 @@ victor listen          # record one utterance, transcribe it, read it back
 victor bench voice     # measure VAD and TTS latency here
 
 victor uia --dump                   # the focused window's elements, 0 API calls
+victor uia --apps                   # applications you can target by name
+victor uia --app Finder             # read a specific app's window
 victor uia --demo                   # the same output shape on any platform
 victor tools                        # what the agent can call
 victor do "what changed on main?"   # one task, printed
