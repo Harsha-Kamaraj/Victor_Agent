@@ -346,6 +346,14 @@ def classify_click(arguments: dict) -> Classification:
     index = arguments.get("index")
     target = f"element {index} ({label!r})" if label else f"element {index}"
 
+    if str(arguments.get("button", "")) == "right":
+        # Checked before the label, because a right click never performs the
+        # thing the label names - it opens a menu. Whatever gets picked from
+        # that menu arrives here as its own click, with its own label, and is
+        # classified then. Asking about a right click on "Delete" would be
+        # asking about the wrong action.
+        return Classification(Risk.SAFE, "opens a context menu")
+
     match = _CONSEQUENTIAL_LABEL.search(label)
     if match:
         return Classification(
@@ -353,10 +361,6 @@ def classify_click(arguments: dict) -> Classification:
             f"clicking {label!r} - {match.group(0).lower()} is not something I can undo",
             target,
         )
-    if str(arguments.get("button", "")) == "right":
-        # A context menu is a read, not an act. What gets picked *from* it comes
-        # back through this classifier as its own click.
-        return Classification(Risk.SAFE, "opens a context menu")
     return Classification(Risk.SAFE, f"clicking {label or target} navigates the interface")
 
 
