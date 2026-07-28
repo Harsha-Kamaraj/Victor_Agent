@@ -77,12 +77,25 @@ def test_catastrophic_calls_are_denied_without_asking() -> None:
     assert confirmer.requests == []
 
 
-def test_dry_run_previews_the_exact_command() -> None:
-    gate = interceptor(dry_run=True)
+def test_dry_run_previews_what_a_glob_matched(tmp_path: Path) -> None:
+    """Echoing the command back is not a preview - the user typed it."""
+    for name in ("a.log", "b.log", "c.log"):
+        (tmp_path / name).write_text("x" * 500, encoding="utf-8")
 
-    review = gate.review(SHELL, {"command": "rm -r build"})
+    gate = interceptor(dry_run=True, cwd=tmp_path)
+    review = gate.review(SHELL, {"command": "rm *.log"})
+
     assert review.decision is Decision.DENY
-    assert "would have run: rm -r build" in review.reason
+    assert "would delete 3 items" in review.reason
+    assert "a.log" in review.reason
+
+
+def test_dry_run_falls_back_to_the_command_when_it_cannot_predict() -> None:
+    gate = interceptor(dry_run=True)
+    review = gate.review(SHELL, {"command": "make deploy"})
+
+    assert review.decision is Decision.DENY
+    assert "would run: make deploy" in review.reason
 
 
 def test_dry_run_still_lets_reads_through() -> None:
@@ -522,3 +535,30 @@ def test_undo_actually_removes_a_created_directory(
     results = undo_last(journal, registry)
     assert results and results[0].ran
     assert not (tmp_path / "newdir").exists()
+
+
+def test_the_kill_switch_reaps_the_whole_process_tree(tmp_path: Path) -> None:
+    """The exit gate says "no orphaned processes".
+
+    A shell that spawns a background child is the ordinary case - `make test`
+    spawns pytest which spawns workers. Killing only the direct child would
+    leave the grandchild running.
+    """
+    marker = tmp_path / "grandchild-alive"
+    script = (
+        f"(while true; do touch {marker}; sleep 0.05; done) & "
+        "sleep 30"
+    )
+    switch = KillSwitch()
+    tool = ShellTool(cwd=tmp_path, timeout=30.0, kill_switch=switch)
+
+    threading.Thread(
+        target=lambda: (time.sleep(0.4), switch.trip("test")), daemon=True
+    ).start()
+    result = tool.run(script)
+    assert result.metadata.get("aborted") is True
+
+    # If the grandchild survived it keeps refreshing the marker's mtime.
+    marker.unlink(missing_ok=True)
+    time.sleep(0.4)
+    assert not marker.exists(), "a grandchild process outlived the kill switch"

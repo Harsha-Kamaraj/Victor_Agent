@@ -369,7 +369,7 @@ def test_dry_run_setting_reaches_the_interceptor(tmp_path: Path) -> None:
     # Writes are previewed, reads still run - a dry run must still investigate.
     blocked = registry.run("shell", {"command": "rm -r build"})
     assert not blocked.ok
-    assert "would have run" in (blocked.error or "")
+    assert "dry run" in (blocked.error or "")
     assert registry.run("shell", {"command": "echo hi"}).ok
 
 

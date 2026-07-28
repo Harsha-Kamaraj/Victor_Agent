@@ -25,6 +25,7 @@ from .classify import Classification, Risk, classify
 from .confirm import Confirmer, ConfirmRequest, DenyingConfirmer, summarise_call
 from .journal import plan_undo
 from .killswitch import KillSwitch
+from .preview import preview
 
 
 @dataclass
@@ -120,11 +121,18 @@ class SafetyInterceptor:
         # From here on the call needs confirmation.
         if self.dry_run:
             self.stats.dry_run += 1
+            # Echoing the command back is not a preview - the user typed it.
+            # What they cannot predict is what a glob matched.
+            detail = (
+                preview(str(arguments["command"]), self.cwd)
+                if spec.name == "shell" and "command" in arguments
+                else f"would run: {summary}"
+            )
             return self._record(
                 spec,
                 arguments,
                 Decision.DENY,
-                f"dry run - would have run: {summary}",
+                f"dry run - {detail}",
                 verdict,
                 summary,
             )
@@ -142,6 +150,11 @@ class SafetyInterceptor:
             summary=summary,
             classification=verdict,
             undo_hint=self._undo_hint(spec.name, arguments),
+            preview=(
+                preview(str(arguments["command"]), self.cwd)
+                if spec.name == "shell" and "command" in arguments
+                else ""
+            ),
         )
         with self.trace.span("safety.confirm", command=summary) as span:
             approved = self.confirmer.confirm(request)

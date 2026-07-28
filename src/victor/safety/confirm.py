@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from .classify import Classification, Risk
+from .preview import spoken as spoken_preview
 
 AFFIRMATIVE = frozenset(
     {"yes", "yeah", "yep", "yup", "confirm", "confirmed", "go ahead", "do it", "proceed", "ok",
@@ -38,19 +39,32 @@ class ConfirmRequest:
     """The exact command or operation, shown verbatim."""
     classification: Classification
     undo_hint: str = ""
+    preview: str = ""
+    """What the command would actually do - matched files, sizes, overwrites.
+
+    The command string alone is not enough to approve: `rm *.log` is exactly
+    what the user typed, and the thing they cannot predict is what it matched.
+    """
 
     def spoken(self) -> str:
         """Phrasing for text-to-speech: short sentences, no punctuation soup."""
-        lines = [f"I want to run {self.summary}.", f"This {self.classification.reason}."]
+        lines = [f"I want to run {self.summary}."]
+        if self.preview:
+            lines.append(spoken_preview(self.preview))
+        else:
+            lines.append(f"This {self.classification.reason}.")
         if self.undo_hint:
             lines.append(self.undo_hint)
         lines.append("Say yes to continue, or no to stop.")
         return " ".join(lines)
 
     def written(self) -> str:
-        return f"{self.summary}\n  {self.classification.reason}" + (
-            f"\n  {self.undo_hint}" if self.undo_hint else ""
-        )
+        parts = [self.summary, f"  {self.classification.reason}"]
+        if self.preview:
+            parts.append(f"  {self.preview}")
+        if self.undo_hint:
+            parts.append(f"  {self.undo_hint}")
+        return "\n".join(parts)
 
 
 @runtime_checkable

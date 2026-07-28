@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import platform
 import re
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -225,6 +226,11 @@ class ShellTool:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                # Put the child in its own group so the whole tree can be
+                # signalled. `make test` spawns pytest which spawns workers;
+                # killing only the direct child orphans the rest, and the plan's
+                # exit gate says "no orphaned processes".
+                **_process_group_kwargs(),
             )
         except OSError as exc:
             return ToolResult(ok=False, error=f"could not run: {exc}")
@@ -320,16 +326,10 @@ class ShellTool:
         deadline = time.monotonic() + limit
         while process.poll() is None:
             if self.kill_switch.tripped:
-                process.terminate()
-                try:
-                    stdout, stderr = process.communicate(timeout=2.0)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    stdout, stderr = process.communicate()
+                stdout, stderr = _reap(process)
                 return stdout, stderr, "aborted"
             if time.monotonic() > deadline:
-                process.kill()
-                stdout, stderr = process.communicate()
+                stdout, stderr = _reap(process)
                 return stdout, stderr, "timeout"
             time.sleep(POLL_INTERVAL)
 
@@ -388,6 +388,52 @@ class ReadFileTool:
             output=body,
             metadata={"path": str(target), "lines": len(lines)},
         )
+
+
+def _process_group_kwargs() -> dict[str, Any]:
+    """Popen options that make the child the root of its own killable group."""
+    if platform.system() == "Windows":
+        flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        return {"creationflags": flags} if flags else {}
+    return {"start_new_session": True}
+
+
+def _reap(process: subprocess.Popen, grace: float = 2.0) -> tuple[str, str]:
+    """Terminate a process and everything it spawned.
+
+    Signals the whole group so a shell that launched children does not leave
+    them running. Escalates to SIGKILL if the group ignores the polite signal,
+    because a kill switch that can be declined is not a kill switch.
+    """
+    try:
+        if platform.system() == "Windows":
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                capture_output=True,
+                timeout=grace,
+            )
+        else:
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+    except (OSError, subprocess.SubprocessError):
+        process.terminate()
+
+    try:
+        return process.communicate(timeout=grace)
+    except subprocess.TimeoutExpired:
+        pass
+
+    try:
+        if platform.system() != "Windows":
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        else:
+            process.kill()
+    except OSError:
+        process.kill()
+
+    try:
+        return process.communicate(timeout=grace)
+    except subprocess.TimeoutExpired:
+        return "", "process did not exit after SIGKILL"
 
 
 def describe_environment(cwd: Path | None = None) -> dict[str, Any]:
