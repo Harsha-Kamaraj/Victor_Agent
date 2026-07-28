@@ -209,7 +209,7 @@ def test_journal_list_distinguishes_reversible_from_not(workspace: Path) -> None
 
     result = runner.invoke(app, ["journal", "list"])
     # The table wraps, so compare on collapsed whitespace.
-    assert "deleted files cannot be restored" in " ".join(result.output.split())
+    assert "cannot be restored" in " ".join(result.output.split())
 
 
 def test_journal_list_is_empty_before_anything_happens(workspace: Path) -> None:

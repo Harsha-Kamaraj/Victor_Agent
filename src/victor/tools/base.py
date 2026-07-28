@@ -230,5 +230,5 @@ class ToolRegistry:
         # stay valid.
         note = getattr(self.interceptor, "note_execution", None)
         if callable(note):
-            note(tool.spec, arguments, ok=result.ok)
+            note(tool.spec, arguments, result=result)
         return result

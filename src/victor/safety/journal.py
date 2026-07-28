@@ -131,9 +131,10 @@ class ActionJournal:
         decision: str,
         reason: str = "",
         ok: bool = True,
+        metadata: dict[str, Any] | None = None,
     ) -> Entry:
         """Append one action. Returns the entry, including its undo plan."""
-        undo, why_not = plan_undo(tool, arguments, ok=ok)
+        undo, why_not = plan_undo(tool, arguments, ok=ok, metadata=metadata)
         entry = Entry(
             id=uuid.uuid4().hex[:12],
             ts=datetime.now(UTC).isoformat(timespec="seconds"),
@@ -237,10 +238,15 @@ _GIT_UNDO = {
 }
 
 #: Why a given command cannot be reversed, phrased for the user.
+#:
+#: The delete entries apply only when the command was *not* rerouted through
+#: the trash - a complex `rm` inside a pipeline, or a session with no trash
+#: configured. A trashed delete never reaches here; its manifest produces a
+#: restore recipe in :func:`plan_undo` first.
 _IRREVERSIBLE = {
-    "rm": "deleted files cannot be restored",
-    "rmdir": "deleted directories cannot be restored",
-    "unlink": "deleted files cannot be restored",
+    "rm": "this delete ran directly, so the files cannot be restored",
+    "rmdir": "this delete ran directly, so the directories cannot be restored",
+    "unlink": "this delete ran directly, so the file cannot be restored",
     "dd": "overwritten data cannot be recovered",
     "truncate": "discarded file contents cannot be recovered",
     "kill": "a terminated process cannot be resumed",
@@ -253,15 +259,35 @@ _IRREVERSIBLE = {
 
 
 def plan_undo(
-    tool: str, arguments: dict[str, Any], *, ok: bool = True
+    tool: str,
+    arguments: dict[str, Any],
+    *,
+    ok: bool = True,
+    metadata: dict[str, Any] | None = None,
 ) -> tuple[Undo | None, str]:
     """Work out how to reverse an action, or why it cannot be.
 
     Returns ``(recipe, reason_if_none)``. Only exact inverses are offered; a
     plausible-looking approximation would be more dangerous than nothing.
+
+    ``metadata`` is the executed tool's result metadata. It is what turns a
+    delete from irreversible into reversible: if the command was rerouted
+    through the trash, the manifest of moved files is right there.
     """
     if not ok:
         return None, "the action did not succeed, so there is nothing to undo"
+
+    trashed = (metadata or {}).get("trashed")
+    if trashed:
+        count = len(trashed)
+        return (
+            Undo(
+                "trash",
+                {"items": trashed},
+                f"restore {count} item{'s' if count != 1 else ''} from the trash",
+            ),
+            "",
+        )
 
     if tool == "read_file":
         return None, "reading changes nothing"

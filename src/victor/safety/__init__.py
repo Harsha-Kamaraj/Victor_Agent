@@ -29,6 +29,7 @@ from .killswitch import (
     Trip,
     is_stop_phrase,
 )
+from .trash import DeletePlan, Trash, TrashedItem, parse_delete, trash_for
 from .undo import undo_entry, undo_last
 
 __all__ = [
@@ -38,6 +39,7 @@ __all__ = [
     "Classification",
     "ConfirmRequest",
     "Confirmer",
+    "DeletePlan",
     "DenyingConfirmer",
     "Entry",
     "HotkeyListener",
@@ -47,10 +49,14 @@ __all__ = [
     "SafetyStats",
     "SignalKillSwitch",
     "SpokenConfirmer",
+    "Trash",
+    "TrashedItem",
     "Trip",
     "TypedConfirmer",
     "Undo",
     "UndoResult",
+    "parse_delete",
+    "trash_for",
     "build_confirmer",
     "classify",
     "classify_git",

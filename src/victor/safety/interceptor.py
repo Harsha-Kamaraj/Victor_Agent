@@ -16,6 +16,7 @@ shortcut; it is what keeps the prompts meaningful when they do appear.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from ..tools.base import Decision, Review, ToolSpec
@@ -58,6 +59,8 @@ class SafetyInterceptor:
         trace: Trace | None = None,
         dry_run: bool = False,
         require_confirmation: bool = True,
+        trash: Any | None = None,
+        cwd: Any | None = None,
     ) -> None:
         self.confirmer = confirmer or DenyingConfirmer()
         self.kill_switch = kill_switch
@@ -65,6 +68,8 @@ class SafetyInterceptor:
         self.trace = trace or Trace.disabled()
         self.dry_run = dry_run
         self.require_confirmation = require_confirmation
+        self.trash = trash
+        self.cwd = Path(cwd) if cwd else Path.cwd()
         self.stats = SafetyStats()
         #: Decisions already made this session, so the same command is not
         #: re-confirmed on every retry within one task.
@@ -152,7 +157,24 @@ class SafetyInterceptor:
     # -- helpers -----------------------------------------------------------
 
     def _undo_hint(self, tool: str, arguments: dict[str, Any]) -> str:
-        """Tell the user up front whether this can be walked back."""
+        """Tell the user up front whether this can be walked back.
+
+        A delete that will be rerouted through the trash is recoverable, and
+        saying so is the whole point of rerouting it - a user who believes a
+        delete is permanent answers a different question than one who knows it
+        is a move.
+        """
+        if self.trash is not None and tool == "shell":
+            from .trash import describe as describe_delete
+            from .trash import parse_delete
+
+            plan = parse_delete(str(arguments.get("command", "")), self.cwd)
+            if plan is not None:
+                return (
+                    f"This moves {describe_delete(plan)} to the trash, "
+                    "not off the disk. `victor undo` puts it back."
+                )
+
         undo, why_not = plan_undo(tool, arguments, ok=True)
         if undo is not None:
             return f"If you change your mind I can {undo.description}."
@@ -181,9 +203,14 @@ class SafetyInterceptor:
         return Review(decision, reason)
 
     def note_execution(
-        self, spec: ToolSpec, arguments: dict[str, Any], *, ok: bool
+        self, spec: ToolSpec, arguments: dict[str, Any], *, result: Any
     ) -> None:
-        """Record an action that actually ran. Called after execution."""
+        """Record an action that actually ran. Called after execution.
+
+        The result matters, not just its success: a delete that was rerouted
+        through the trash carries the restore manifest in its metadata, and
+        that is what makes the entry reversible.
+        """
         if self.journal is None:
             return
         verdict = classify(spec.name, arguments, mutating=spec.mutating)
@@ -196,7 +223,8 @@ class SafetyInterceptor:
             risk=verdict.risk,
             decision=str(Decision.ALLOW),
             reason=verdict.reason,
-            ok=ok,
+            ok=getattr(result, "ok", True),
+            metadata=getattr(result, "metadata", None),
         )
         self.trace.event(
             "safety.journal",

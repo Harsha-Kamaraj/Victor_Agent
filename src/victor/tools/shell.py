@@ -87,12 +87,14 @@ class ShellTool:
         env: dict[str, str] | None = None,
         enabled: bool = True,
         kill_switch: Any | None = None,
+        trash: Any | None = None,
     ) -> None:
         self.cwd = Path(cwd or Path.cwd())
         self.timeout = timeout
         self.env = env
         self.enabled = enabled
         self.kill_switch = kill_switch
+        self.trash = trash
         self.spec = ToolSpec(
             name="shell",
             description=(
@@ -151,6 +153,10 @@ class ShellTool:
         if not workdir.is_dir():
             return ToolResult(ok=False, error=f"no such directory: {workdir}")
 
+        trashed = self._delete_via_trash(command, workdir)
+        if trashed is not None:
+            return trashed
+
         limit = min(float(timeout or self.timeout), MAX_TIMEOUT)
         env = {**os.environ, **(self.env or {})}
         invocation = self._shell_for_platform()
@@ -200,6 +206,49 @@ class ShellTool:
                 "command": command,
                 "exit_code": process.returncode,
                 "cwd": str(workdir),
+            },
+        )
+
+    def _delete_via_trash(self, command: str, workdir: Path) -> ToolResult | None:
+        """Reroute a plain delete into the trash so it can be undone.
+
+        Returns ``None`` when the command is not a delete, or is too complex to
+        rewrite safely - those run exactly as written.
+        """
+        if self.trash is None:
+            return None
+
+        from ..safety.trash import describe, parse_delete
+
+        plan = parse_delete(command, workdir)
+        if plan is None:
+            return None
+
+        # Measure before moving: once the paths are in the trash there is
+        # nothing left at the original locations to size.
+        summary = describe(plan)
+
+        try:
+            items = self.trash.store_all(plan.paths)
+        except OSError as exc:
+            return ToolResult(
+                ok=False,
+                error=f"could not move to trash: {exc}",
+                metadata={"command": command},
+            )
+
+        self.trash.prune()
+        return ToolResult(
+            ok=True,
+            output=(
+                f"Moved {summary} to the trash.\n"
+                "Nothing was permanently deleted - `victor undo` restores it."
+            ),
+            metadata={
+                "command": command,
+                "exit_code": 0,
+                "cwd": str(workdir),
+                "trashed": [item.to_json() for item in items],
             },
         )
 

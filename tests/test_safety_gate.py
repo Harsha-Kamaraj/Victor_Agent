@@ -116,14 +116,32 @@ def test_disabling_confirmation_is_honoured_but_counted() -> None:
     assert gate.stats.confirmed == 0
 
 
-def test_the_request_tells_the_user_if_it_cannot_be_undone() -> None:
+def test_a_direct_delete_is_declared_irreversible() -> None:
+    """With no trash configured, `rm` really is permanent - say so."""
     confirmer = AutoConfirmer(True)
     gate = interceptor(confirmer=confirmer)
     gate.review(SHELL, {"command": "rm notes.txt"})
 
     hint = confirmer.requests[0].undo_hint
     assert "cannot be undone" in hint
-    assert "deleted files cannot be restored" in hint
+    assert "ran directly" in hint
+
+
+def test_a_trashed_delete_is_declared_recoverable(tmp_path: Path) -> None:
+    """A user who thinks a delete is permanent answers a different question."""
+    from victor.safety.trash import Trash
+
+    (tmp_path / "notes.txt").write_text("data", encoding="utf-8")
+    confirmer = AutoConfirmer(True)
+    gate = interceptor(
+        confirmer=confirmer, trash=Trash(tmp_path / "trash", "s1"), cwd=tmp_path
+    )
+    gate.review(SHELL, {"command": "rm notes.txt"})
+
+    hint = confirmer.requests[0].undo_hint
+    assert "to the trash" in hint
+    assert "victor undo" in hint
+    assert "cannot be undone" not in hint
 
 
 def test_the_request_offers_undo_when_one_exists() -> None:
@@ -343,16 +361,41 @@ def test_journal_skips_a_corrupt_line(tmp_path: Path) -> None:
     assert len(list(journal)) == 2
 
 
-def test_deletes_are_recorded_as_irreversible(tmp_path: Path) -> None:
-    """The honest half of the journal: rm gets no undo recipe."""
+def test_a_direct_delete_gets_no_undo_recipe(tmp_path: Path) -> None:
+    """A delete that bypassed the trash cannot be walked back, and says so."""
     journal = ActionJournal(tmp_path / "j.jsonl")
     entry = journal.record(
         "shell", {"command": "rm notes.txt"}, risk=Risk.CONFIRM, decision="allow"
     )
 
     assert entry.undo is None
-    assert entry.no_undo_reason == "deleted files cannot be restored"
+    assert "ran directly" in entry.no_undo_reason
     assert not entry.reversible
+
+
+def test_a_trashed_delete_gets_a_restore_recipe(tmp_path: Path) -> None:
+    journal = ActionJournal(tmp_path / "j.jsonl")
+    entry = journal.record(
+        "shell",
+        {"command": "rm notes.txt"},
+        risk=Risk.CONFIRM,
+        decision="allow",
+        metadata={
+            "trashed": [
+                {
+                    "original": str(tmp_path / "notes.txt"),
+                    "stored": str(tmp_path / "trash" / "ab_notes.txt"),
+                    "size": 4,
+                    "is_dir": False,
+                }
+            ]
+        },
+    )
+
+    assert entry.reversible
+    assert entry.undo is not None
+    assert entry.undo.tool == "trash"
+    assert "restore 1 item" in entry.undo.description
 
 
 def test_failed_actions_get_no_undo(tmp_path: Path) -> None:
@@ -476,6 +519,6 @@ def test_undo_actually_removes_a_created_directory(
     journal.record("shell", {"command": "mkdir newdir"}, risk=Risk.CONFIRM, decision="allow")
     assert (tmp_path / "newdir").is_dir()
 
-    result = undo_last(journal, registry)
-    assert result is not None and result.ran
+    results = undo_last(journal, registry)
+    assert results and results[0].ran
     assert not (tmp_path / "newdir").exists()

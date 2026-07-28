@@ -52,6 +52,7 @@ def build_registry(
     interceptor: Interceptor | None = None,
     shell: bool = True,
     kill_switch: object | None = None,
+    trash: object | None = None,
 ) -> ToolRegistry:
     """The standard tool set, gated by the safety interceptor.
 
@@ -71,7 +72,7 @@ def build_registry(
 
     registry = ToolRegistry(chosen)
     if shell:
-        registry.register(ShellTool(cwd=workdir, kill_switch=kill_switch))
+        registry.register(ShellTool(cwd=workdir, kill_switch=kill_switch, trash=trash))
     registry.register(ReadFileTool(cwd=workdir))
     registry.register(GitTool(cwd=workdir))
     return registry
