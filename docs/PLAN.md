@@ -118,14 +118,62 @@ figures above are macOS.
 
 ---
 
-## P2 · Agent Core
+## P2 · Agent Core ✅
 
-**Build** — ReAct loop over the router's TEXT workload, a tool registry with
-JSON-schema'd tools, and the first two tools: `shell` and `git`. Loop state,
-step cap, and every step traced.
+**Built**
+- `tools/base.py` — tool contract, registry, and the interceptor seam.
+- `tools/shell.py`, `tools/git.py` — `shell`, `read_file`, `git`.
+- `agent/llm.py` — chat client for the text tier, with token reconciliation
+  and fall-through on 429.
+- `agent/loop.py` — the ReAct loop and its budgets.
+- `agent/prompts.py` — system prompt, plus the STT vocabulary bias.
+- CLI: `victor do`, `victor converse`, `victor tools`.
 
-**Exit gate** — "what branch am I on and what changed?" runs the right tools in
-sequence and answers correctly.
+**Exit gate** — "what branch am I on and what changed?" drove three real `git`
+invocations (`rev-parse`, `log`, `status`) against this repository in sequence,
+each result fed back before the next decision, answered in 4 steps and 580
+tokens. ✅
+
+### Budgets are the design
+
+A free tier of ~1,000 requests a day and 8,000 tokens a minute means an
+unbounded loop does not hang, it ends the day. Three limits, all reported in
+the result rather than silently applied:
+
+- **Step cap** — default 8 think-act cycles.
+- **Token budget** — default 20,000 per task.
+- **Repetition guard** — identical consecutive tool calls are refused with a
+  message telling the model to try something else. A stuck model will
+  otherwise spend the entire allowance repeating one mistake, and this is the
+  single cheapest protection against that.
+
+Tool output is truncated at the tool boundary, head and tail kept, because one
+noisy `git log` can exceed the per-minute token budget on its own. The failure
+mode without it is not a clean error — it is the agent losing the earlier half
+of its own conversation.
+
+### A 429 outranks the ledger
+
+Declared free-tier numbers are conservative but providers change them silently.
+When the API returns 429, the client marks that model spent for the day and
+retries down the chain *mid-task*. Covered by test: first request goes to
+`gpt-oss-120b`, the 429 sends the second to `llama-3.3-70b`, and the run still
+answers.
+
+### Model mistakes are results, not exceptions
+
+Unknown tool names, malformed JSON arguments, wrong kwargs, blocked calls — all
+come back as failed `ToolResult`s the model can read and correct on the next
+step. An exception would end a run that was one message away from recovering.
+
+### Still missing, and stated in the product
+
+`victor tools` and `victor doctor` both say out loud that the P3 interceptor
+does not exist yet and that mutating tools currently run behind only a
+denylist. That denylist (`rm -rf`, `mkfs`, `dd` to a device, fork bombs,
+curl-pipe-to-shell, force push) is a guard against an obvious model mistake,
+**not** a security boundary, and it is documented as such in
+`src/victor/tools/shell.py`.
 
 ---
 

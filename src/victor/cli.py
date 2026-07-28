@@ -385,6 +385,141 @@ def listen(
             pipeline.close()
 
 
+# --- agent ----------------------------------------------------------------
+
+
+def _render_step(step: object) -> None:
+    """Print one think-act cycle as it happens."""
+    for call, result in getattr(step, "calls", ()):
+        mark = "[green]ok[/green]" if result.ok else "[red]fail[/red]"
+        console.print(f"  [dim]{mark}[/dim] [cyan]{call}[/cyan]")
+        detail = (result.error or result.output).strip().splitlines()
+        if detail:
+            console.print(f"       [dim]{detail[0][:100]}[/dim]")
+
+
+@app.command(name="do")
+def do_task(
+    task: Annotated[str, typer.Argument(help="What you want done.")],
+    steps: Annotated[int, typer.Option("--steps", help="Maximum think-act cycles.")] = 8,
+    speak_reply: Annotated[
+        bool, typer.Option("--speak", help="Read the answer aloud.")
+    ] = False,
+    show_steps: Annotated[
+        bool, typer.Option("--steps-visible/--quiet-steps", help="Print tool calls.")
+    ] = True,
+) -> None:
+    """Run one task through the agent and print the answer."""
+    from .agent import build_agent
+
+    settings = _settings()
+    with Trace.open(settings.paths.ensure().traces_dir, label="do") as trace:
+        agent = build_agent(settings, trace=trace, max_steps=steps)
+        if show_steps:
+            agent.on_step = _render_step
+        try:
+            if settings.dry_run:
+                console.print("[yellow]dry run:[/yellow] mutating tools will not execute")
+            result = agent.run(task)
+        finally:
+            agent.close()
+
+    console.print()
+    style = "bold green" if result.ok else "bold yellow"
+    console.print(Text(result.answer or "(no answer)", style=style))
+    console.print(f"[dim]{result.summary()}[/dim]")
+
+    if speak_reply and result.answer:
+        from .voice import Player, build_synthesizer
+        from .voice import speak as do_speak
+
+        synth = build_synthesizer(settings.paths.models_dir)
+        do_speak(synth, Player(), result.answer)
+
+    if not result.ok:
+        raise typer.Exit(1)
+
+
+@app.command()
+def converse(
+    turns: Annotated[int, typer.Option("--turns", help="How many exchanges before exiting.")] = 0,
+    mode: Annotated[str, typer.Option("--mode", help="vad | ptt")] = "vad",
+    steps: Annotated[int, typer.Option("--steps")] = 8,
+) -> None:
+    """Hold a spoken conversation: listen, think, act, reply out loud.
+
+    ``--turns 0`` means keep going until interrupted.
+    """
+    from .agent import STT_PROMPT, build_agent
+    from .voice import ListenMode, NoSpeechDetected, build_pipeline
+
+    settings = _settings()
+    listen_mode = ListenMode(mode)
+
+    with Trace.open(settings.paths.ensure().traces_dir, label="converse") as trace:
+        pipeline = build_pipeline(settings, trace=trace)
+        agent = build_agent(settings, trace=trace, max_steps=steps, voice=True)
+        agent.on_step = _render_step
+        try:
+            warm_ms = pipeline.warm() * 1000
+            console.print(f"[dim]voice ready in {warm_ms:.0f}ms. Ctrl-C to stop.[/dim]")
+
+            turn_index = 0
+            while turns == 0 or turn_index < turns:
+                turn_index += 1
+                console.print()
+                if listen_mode is ListenMode.PTT:
+                    console.print("[bold]recording[/bold] - press Enter to stop")
+                else:
+                    console.print("[bold]listening[/bold]")
+
+                try:
+                    heard = pipeline.listen(listen_mode, prompt=STT_PROMPT)
+                except NoSpeechDetected:
+                    console.print("[dim]nothing heard, still listening[/dim]")
+                    continue
+
+                if not heard.text:
+                    continue
+                console.print(f"[bold cyan]you:[/bold cyan] {heard.text}")
+
+                result = agent.run(heard.text)
+                console.print(f"[bold green]victor:[/bold green] {result.answer}")
+                if result.answer:
+                    pipeline.speak(result.answer)
+        except KeyboardInterrupt:
+            console.print("\n[dim]stopped[/dim]")
+        finally:
+            pipeline.close()
+            agent.close()
+
+
+@app.command()
+def tools() -> None:
+    """List the tools the agent can call."""
+    from .tools import build_registry
+
+    settings = _settings()
+    registry = build_registry(settings)
+
+    table = Table(title="tools", title_justify="left")
+    table.add_column("name", style="bold")
+    table.add_column("mutating")
+    table.add_column("description", overflow="fold")
+
+    for tool in registry:
+        flag = (
+            Text("yes", style="yellow") if tool.spec.mutating else Text("no", style="green")
+        )
+        table.add_row(tool.spec.name, flag, tool.spec.description)
+    console.print(table)
+    console.print(
+        "\n[dim]Mutating tools are gated by the P3 interceptor, which is not built yet. "
+        "Until then only an irreversible-command denylist stands in the way - "
+        "see src/victor/tools/shell.py.[/dim]"
+    )
+
+
 # --- benchmarks -----------------------------------------------------------
 
 

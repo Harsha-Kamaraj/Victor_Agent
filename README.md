@@ -2,7 +2,9 @@
 
 A voice-driven computer-use agent for Windows that runs entirely on free API tiers — because it reads the accessibility tree instead of guessing pixels.
 
-**Status: P0–P1 complete.** Plumbing (config, quota ledger, provider router, tracing, CLI) and voice I/O (mic → VAD → STT → TTS) are built, tested and measured. Everything below the P1 line is not implemented yet, and `victor doctor` says so out loud rather than reporting a green tick for a pipeline that does not exist. See [docs/PLAN.md](docs/PLAN.md) for the full plan, including the parts that were deliberately cut.
+**Status: P0–P2 complete.** Plumbing, voice I/O, and the agent core (ReAct loop, tools, shell and git) are built and tested. Everything below the P2 line is not implemented yet, and `victor doctor` says so out loud rather than reporting a green tick for a pipeline that does not exist. See [docs/PLAN.md](docs/PLAN.md) for the full plan, including the parts that were deliberately cut.
+
+> **Safety note for the current state.** P3 is the phase that adds classification, spoken confirmation, dry-run and undo. It does not exist yet, so mutating tools run behind only a short denylist of irreversible commands. That denylist is a guard against an obvious model mistake, **not** a security boundary. Run with `VICTOR_DRY_RUN=true` until P3 lands.
 
 ## What it will do
 
@@ -62,7 +64,7 @@ Phases are units of execution and integration, not a calendar. Each has an exit 
 
 - [x] **P0 · Skeleton & Plumbing** — config, quota ledger, provider router, session tracing, CLI
 - [x] **P1 · Voice I/O** — mic → VAD → STT → TTS, push-to-talk, latency benchmarks
-- [ ] **P2 · Agent Core** — ReAct loop, tool registry, shell and git tools
+- [x] **P2 · Agent Core** — ReAct loop, tool registry, shell and git tools
 - [ ] **P3 · Safety & Reversibility** — interceptor, dry-run, kill switch, action journal + undo
 - [ ] **P4 · Screen Perception** — UIA tree reader, screen capture, vision fallback (parallelizable)
 - [ ] **P5 · Desktop Actuation** — UIA-driven clicks and typing, gated by P3, using P4
@@ -128,9 +130,16 @@ victor voice devices   # list microphones and speakers
 victor say "hello"     # local synthesis, no network
 victor listen          # record one utterance, transcribe it, read it back
 victor bench voice     # measure VAD and TTS latency here
+
+victor tools                        # what the agent can call
+victor do "what changed on main?"   # one task, printed
+victor do "..." --speak             # and read aloud
+victor converse                     # hold a spoken conversation
 ```
 
-`victor listen` has no agent behind it until P2, so it acknowledges what it heard rather than answering. It exists to prove the mic → STT → TTS round trip works before anything is built on top of it.
+`victor do` runs the ReAct loop: the model picks a tool, reads the result, and decides again, up to a step and token budget it reports at the end. `victor converse` wires that between the microphone and the speaker.
+
+Budgets exist because the free tier is real. A run stops at 8 steps or 20,000 tokens, identical consecutive tool calls are refused, and tool output is truncated before it reaches the model — one noisy `git log` can otherwise exceed the 8,000 tokens-per-minute allowance by itself.
 
 Developing on macOS or Linux is supported for everything except P4/P5 — see the [development environment notes](docs/PLAN.md#development-environment), which include the Homebrew `pyexpat` and macOS hidden-`.pth` workarounds.
 

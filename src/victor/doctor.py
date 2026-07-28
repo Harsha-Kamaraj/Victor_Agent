@@ -254,11 +254,36 @@ def _check_voice(settings: Settings) -> Iterator[Check]:
             )
 
 
+def _check_agent(settings: Settings) -> Iterator[Check]:
+    """P2: the loop is wired and has tools, even if it cannot call out yet."""
+    from .tools import build_registry, is_repository
+
+    registry = build_registry(settings)
+    yield Check("agent tools", Status.OK, ", ".join(registry.names))
+
+    if not settings.has("groq_api_key"):
+        yield Check(
+            "agent loop",
+            Status.WARN,
+            "wired, but no text model is reachable without GROQ_API_KEY",
+        )
+    else:
+        yield Check("agent loop", Status.OK, "ReAct loop ready")
+
+    if is_repository():
+        yield Check("git repository", Status.OK, "cwd is inside a work tree")
+    else:
+        yield Check("git repository", Status.SKIP, "cwd is not a git work tree")
+
+
 def _check_pending() -> Iterator[Check]:
     """Capabilities the README promises that later phases will deliver."""
     on_windows = platform.system() == "Windows"
-    yield Check("agent loop", Status.PENDING, "P2 not implemented")
-    yield Check("safety interceptor", Status.PENDING, "P3 not implemented")
+    yield Check(
+        "safety interceptor",
+        Status.PENDING,
+        "P3 not implemented - mutating tools run behind only a denylist",
+    )
     if on_windows:
         yield Check("UIA tree access", Status.PENDING, "P4 not implemented")
     else:
@@ -283,6 +308,7 @@ def run_checks(settings: Settings, *, network: bool = True) -> list[Check]:
     checks += list(_check_tooling())
     checks += list(_check_dependencies())
     checks += list(_check_voice(settings))
+    checks += list(_check_agent(settings))
     if network:
         checks += list(_check_network(settings))
     else:
