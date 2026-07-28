@@ -27,6 +27,11 @@ dependencies = [
     "pydantic>=2.10",
     "pydantic-settings>=2.7",
     "httpx>=0.28",
+    # Windows ships no IANA time zone database, and the quota ledger needs one:
+    # Groq's day rolls at UTC midnight and Google's at midnight Pacific, so
+    # ZoneInfo("America/Los_Angeles") is load-bearing rather than cosmetic.
+    # Without this the ledger raises ZoneInfoNotFoundError on any daily rollover.
+    "tzdata>=2024.1; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

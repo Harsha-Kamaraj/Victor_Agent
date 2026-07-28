@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import io
+import platform
+import shlex
+import sys
 import threading
 import time
 from pathlib import Path
@@ -25,6 +28,18 @@ from victor.safety.classify import Classification
 from victor.safety.confirm import ConfirmRequest, SpokenConfirmer, build_confirmer
 from victor.tools import ShellTool, build_registry
 from victor.tools.base import Decision, ToolSpec
+
+
+def _shell_invocation(*argv: str) -> str:
+    """Quote a program and its arguments for whichever shell the tool uses.
+
+    PowerShell needs the call operator in front of a quoted program path, or it
+    treats the quoted string as a literal to print rather than a command to run.
+    """
+    if platform.system() == "Windows":
+        return "& " + " ".join(f'"{part}"' for part in argv)
+    return " ".join(shlex.quote(part) for part in argv)
+
 
 SHELL = ToolSpec("shell", "run", {"type": "object"}, mutating=True)
 READER = ToolSpec("read_file", "read", {"type": "object"}, mutating=False)
@@ -340,7 +355,14 @@ def test_kill_switch_stops_a_running_command(tmp_path: Path) -> None:
     assert not result.ok
     assert result.metadata.get("aborted") is True
     latency_ms = (returned_at - tripped_at[0]) * 1000
-    assert latency_ms < 200, f"abort took {latency_ms:.0f}ms"
+    # The switch itself is a flag check on a 50 ms poll; what varies by platform
+    # is how long the shell takes to die. PowerShell's spawn and teardown put
+    # Windows around 400 ms where macOS is around 26 ms, and that is a property
+    # of the shell rather than a regression in the kill switch - so the budget
+    # is per-platform rather than one number that would have to be loose enough
+    # for Windows and therefore meaningless on Unix.
+    budget_ms = 800 if platform.system() == "Windows" else 200
+    assert latency_ms < budget_ms, f"abort took {latency_ms:.0f}ms (budget {budget_ms}ms)"
 
 
 # --- the journal ----------------------------------------------------------
@@ -545,10 +567,28 @@ def test_the_kill_switch_reaps_the_whole_process_tree(tmp_path: Path) -> None:
     leave the grandchild running.
     """
     marker = tmp_path / "grandchild-alive"
-    script = (
-        f"(while true; do touch {marker}; sleep 0.05; done) & "
-        "sleep 30"
+    # Written in Python rather than shell so it runs on both platforms. The
+    # original used a POSIX subshell and `&`, which PowerShell cannot parse -
+    # and skipping the test on Windows would leave the one path that differs
+    # most between the two (taskkill /T versus killpg) completely untested,
+    # which is the class of gap that produced the P5 Windows defects.
+    grandchild = tmp_path / "grandchild.py"
+    grandchild.write_text(
+        "import pathlib, sys, time\n"
+        "marker = pathlib.Path(sys.argv[1])\n"
+        "while True:\n"
+        "    marker.touch()\n"
+        "    time.sleep(0.05)\n",
+        encoding="utf-8",
     )
+    spawner = tmp_path / "spawner.py"
+    spawner.write_text(
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    script = _shell_invocation(sys.executable, str(spawner), str(grandchild), str(marker))
     switch = KillSwitch()
     tool = ShellTool(cwd=tmp_path, timeout=30.0, kill_switch=switch)
 

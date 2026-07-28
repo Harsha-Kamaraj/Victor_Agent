@@ -261,7 +261,10 @@ def test_a_complex_delete_still_runs_for_real(
     gate = SafetyInterceptor(confirmer=AutoConfirmer(True), trash=trash, cwd=tmp_path)
     registry = build_registry(settings, cwd=tmp_path, interceptor=gate, trash=trash)
 
-    result = registry.run("shell", {"command": "rm a.log && echo removed"})
+    # `;` rather than `&&`: both are in the parser's too-complex set, but `&&`
+    # is a parse error in PowerShell 5.1, which is the shell this tool uses on
+    # Windows. The test is about the parser declining, not about the operator.
+    result = registry.run("shell", {"command": "rm a.log ; echo removed"})
     assert result.ok
     assert not (tmp_path / "a.log").exists()
     assert "trash" not in result.output
