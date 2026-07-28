@@ -63,8 +63,11 @@ def _check_runtime() -> Iterator[Check]:
 
 def _check_config(settings: Settings) -> Iterator[Check]:
     required = {"groq_api_key": "GROQ_API_KEY"}
-    recommended = {"gemini_api_key": "GEMINI_API_KEY"}
-    optional = {"github_token": "GITHUB_TOKEN"}
+    # Keys whose consumer is not built yet. Reporting a missing one as WARN
+    # would imply the capability exists and is merely degraded, which is the
+    # kind of overstatement the PENDING convention exists to prevent.
+    unused_yet = {"gemini_api_key": ("GEMINI_API_KEY", "vision", "P4")}
+    optional = {"github_token": ("GITHUB_TOKEN", "Scout", "P7")}
 
     for field, env in required.items():
         if settings.has(field):
@@ -78,21 +81,11 @@ def _check_config(settings: Settings) -> Iterator[Check]:
                 "Free key: https://console.groq.com/keys",
             )
 
-    for field, env in recommended.items():
-        if settings.has(field):
-            yield Check(f"key {env}", Status.OK, "set")
-        else:
-            yield Check(
-                f"key {env}",
-                Status.WARN,
-                "missing - vision falls back to Groq Llama-4-Scout",
-                hint="Free key: https://aistudio.google.com/apikey",
-            )
-
-    for field, env in optional.items():
-        status = Status.OK if settings.has(field) else Status.SKIP
-        detail = "set" if settings.has(field) else "not set - P7 Scout will be rate limited"
-        yield Check(f"key {env}", status, detail)
+    for field, (env, feature, phase) in {**unused_yet, **optional}.items():
+        detail = f"set - unused until {feature} lands in {phase}"
+        if not settings.has(field):
+            detail = f"not set - only needed once {feature} lands in {phase}"
+        yield Check(f"key {env}", Status.SKIP, detail)
 
 
 def _check_storage(settings: Settings) -> Iterator[Check]:
@@ -319,6 +312,14 @@ def _check_safety(settings: Settings) -> Iterator[Check]:
 def _check_pending() -> Iterator[Check]:
     """Capabilities the README promises that later phases will deliver."""
     on_windows = platform.system() == "Windows"
+    # The routing table lists a vision chain, so say plainly that nothing can
+    # call it yet. `victor route vision` resolves a model; no client exists.
+    yield Check(
+        "vision",
+        Status.PENDING,
+        "P4 not implemented - routing is wired, no client sends images",
+    )
+    yield Check("screen capture", Status.PENDING, "P4 not implemented")
     if on_windows:
         yield Check("UIA tree access", Status.PENDING, "P4 not implemented")
     else:
