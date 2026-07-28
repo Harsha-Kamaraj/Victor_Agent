@@ -101,6 +101,11 @@ class UIABackend:
             self._load()
         except PerceptionUnavailable as exc:
             return False, str(exc)
+        from .session import session_locked
+
+        locked, why = session_locked()
+        if locked:
+            return False, why
         return True, "UI Automation ready"
 
     def focused_window(self) -> Any | None:
@@ -312,6 +317,20 @@ class TreeReader:
             if depth < self.limits.max_depth:
                 frontier.extend((child, depth + 1) for child in self.backend.children(node))
 
+        # Every element is filtered on having a visible rectangle, so a window
+        # the OS will not measure produces an empty list that looks exactly like
+        # a window with nothing in it. They are not the same problem: one is
+        # "there is nothing to click", the other is "the window is minimised, on
+        # another desktop, or off-screen". Distinguishing them here is cheap and
+        # saves everyone downstream from guessing.
+        note = ""
+        if not elements and rect.empty:
+            note = (
+                f"{title} reports no position or size, so none of its controls "
+                "could be measured. It is probably minimised, on another desktop, "
+                "or positioned off-screen. Bring it into view and read again."
+            )
+
         return Snapshot(
             window_title=title,
             process=process,
@@ -320,6 +339,7 @@ class TreeReader:
             truncated=truncated,
             duration_ms=(time.perf_counter() - started) * 1000,
             backend=self.backend.name,
+            note=note,
         )
 
 

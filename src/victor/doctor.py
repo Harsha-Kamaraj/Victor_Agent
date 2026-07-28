@@ -333,6 +333,25 @@ def _check_perception(settings: Settings) -> Iterator[Check]:
     else:
         yield Check(label, Status.SKIP, detail)
 
+    # Actuation reuses the same permission and the same session, so there is
+    # nothing new to probe - only whether it is switched on. Reported separately
+    # because "Victor can see your screen" and "Victor can click on it" are
+    # different things to be told.
+    from .desktop import select_actuator
+
+    actuator = select_actuator()
+    act_ok, act_detail = actuator.available()
+    yield Check(
+        f"desktop actuation ({actuator.name})",
+        Status.OK if act_ok else Status.WARN,
+        f"{act_detail}"
+        + (
+            ""
+            if settings.desktop_control
+            else " - off by default; pass --desktop or set VICTOR_DESKTOP_CONTROL=1"
+        ),
+    )
+
     capture_ok, capture_detail = ScreenCapture.available()
     yield (
         Check("screen capture", Status.OK, capture_detail)
@@ -360,11 +379,6 @@ def _check_perception(settings: Settings) -> Iterator[Check]:
 
 def _check_pending() -> Iterator[Check]:
     """Capabilities the README promises that later phases will deliver."""
-    yield Check(
-        "desktop actuation",
-        Status.PENDING,
-        "P5 not implemented - perception is read-only, nothing clicks yet",
-    )
     yield Check("memory index", Status.PENDING, "P6 not implemented")
 
 

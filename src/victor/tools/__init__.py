@@ -55,6 +55,7 @@ def build_registry(
     trash: object | None = None,
     desktop: bool | None = None,
     app: str | None = None,
+    vision: object | None = None,
 ) -> ToolRegistry:
     """The standard tool set, gated by the safety interceptor.
 
@@ -85,6 +86,6 @@ def build_registry(
     if desktop if desktop is not None else settings.desktop_control:
         from .desktop import build_desktop_tools
 
-        for tool in build_desktop_tools(kill_switch=kill_switch, app=app):
+        for tool in build_desktop_tools(kill_switch=kill_switch, app=app, vision=vision):
             registry.register(tool)
     return registry

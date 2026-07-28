@@ -452,6 +452,177 @@ def test_terminal_detection(title, process, expected):
     assert looks_like_terminal(title, process) is expected
 
 
+# --- is anyone looking at the screen? --------------------------------------
+
+
+def test_a_locked_mac_screen_is_reported_as_such(monkeypatch):
+    """Found live: a locked screen answers every AX question except geometry,
+    so every rectangle is empty and the window looks like it has no controls."""
+    from victor.desktop import session
+
+    monkeypatch.setattr(session.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(
+        session, "_mac_locked", lambda: (True, "the screen is locked. Unlock it.")
+    )
+    locked, why = session.session_locked()
+    assert locked and "locked" in why
+
+
+def test_lock_detection_fails_open(monkeypatch):
+    """A probe that cannot answer must not block work on a guess."""
+    from victor.desktop import session
+
+    monkeypatch.setattr(session.platform, "system", lambda: "Linux")
+    assert session.session_locked() == (False, "")
+
+
+def test_an_unmeasurable_window_is_not_confused_with_an_empty_one():
+    """The two look identical to a caller that only counts elements."""
+    from victor.desktop.elements import Snapshot
+
+    measured = Snapshot("W", "p", (), rect=Rect(0, 0, 800, 600))
+    unmeasured = Snapshot("W", "p", (), rect=Rect(0, 0, 0, 0), note="off-screen")
+    assert measured.empty and unmeasured.empty
+    assert not measured.note and unmeasured.note
+    assert "off-screen" in unmeasured.render()
+
+
+# --- the vision fallback, and what it costs --------------------------------
+
+
+class FakeVision:
+    """Stands in for VisionClient. Answers with a fixed index, or refuses."""
+
+    def __init__(self, index: int | None = 0, *, exhausted: bool = False) -> None:
+        self.index = index
+        self.exhausted = exhausted
+        self.calls = 0
+
+    def locate(self, request, shot, snapshot=None):
+        from victor.desktop.vision import VisionAnswer, VisionUnavailable
+
+        self.calls += 1
+        if self.exhausted:
+            raise VisionUnavailable("no vision quota left today")
+        element = snapshot.by_index(self.index) if snapshot and self.index is not None else None
+        return VisionAnswer(
+            index=self.index, raw=str(self.index), model="fake/vlm", latency_ms=1.0,
+            element=element,
+        )
+
+
+class FakeCapture:
+    """A capture that never touches a screen."""
+
+    def capture(self, region=None, *, force=False):
+        from victor.desktop.capture import Screenshot
+
+        return Screenshot(data=b"", width=10, height=10, fingerprint="0" * 16), True
+
+
+def vision_tool(*buttons: str, vision: FakeVision | None = None):
+    from victor.tools.desktop import FindOnScreenTool
+
+    actuator = FakeActuator()
+    desk = Desktop(TreeReader(FakeBackend(tree(*buttons), title="W")), actuator, settle=0.0)
+    return FindOnScreenTool(desk, vision or FakeVision(), FakeCapture())
+
+
+def test_find_on_screen_reports_what_it_spent(monkeypatch):
+    monkeypatch.setattr("victor.desktop.vision.annotate", lambda shot, snap, **kw: shot)
+    tool = vision_tool("Compose", "Settings")
+    result = tool.run(description="the compose button")
+    assert result.ok
+    assert result.metadata["cost"] == 1
+    assert "index 0" in result.output and "Compose" in result.output
+
+
+def test_running_out_of_vision_leaves_a_working_agent(monkeypatch):
+    monkeypatch.setattr("victor.desktop.vision.annotate", lambda shot, snap, **kw: shot)
+    tool = vision_tool("Compose", vision=FakeVision(exhausted=True))
+    result = tool.run(description="anything")
+    assert result.ok is False
+    assert "screen_read still works" in (result.error or "")
+    assert result.metadata["quota"] == "exhausted"
+
+
+def test_the_free_tools_declare_that_they_are_free():
+    tools, _ = tools_over("Compose")
+    assert tools["click"].run(index=0, label="Compose").metadata["cost"] == 0
+    assert tools["screen_read"].run().metadata["cost"] == 0
+
+
+def test_an_empty_tree_points_at_the_fallback():
+    """A canvas is the case vision exists for; saying so saves a step."""
+    actuator = FakeActuator()
+    blank = FakeNode("Window", "Game", Rect(0, 0, 800, 600), children=[])
+    desk = Desktop(TreeReader(FakeBackend(blank, title="Game")), actuator, settle=0.0)
+    tools = {t.spec.name: t for t in build_desktop_tools(desktop=desk)}
+    output = tools["screen_read"].run().output
+    assert "no readable controls" in output and "find_on_screen" in output
+
+
+def test_an_unmeasurable_window_says_so_instead_of_reporting_nothing():
+    """An off-screen window and an empty one look identical without this.
+
+    Found the hard way: Calculator reopened off the left edge of the display,
+    macOS refused to report its position, every rectangle came back empty, and
+    Victor cheerfully said "0 elements" - which sends you looking at the tree
+    walk instead of at the window.
+    """
+    actuator = FakeActuator()
+    offscreen = FakeNode(
+        "Window",
+        "Calculator",
+        Rect(0, 0, 0, 0),
+        children=[FakeNode("Button", "Equals", Rect(0, 0, 0, 0))],
+    )
+    desk = Desktop(TreeReader(FakeBackend(offscreen, title="Calculator")), actuator, settle=0.0)
+    snapshot = desk.snapshot(refresh=True)
+    assert snapshot.empty
+    assert "off-screen" in snapshot.note
+    tools = {t.spec.name: t for t in build_desktop_tools(desktop=desk)}
+    assert "minimised" in tools["screen_read"].run().output
+
+
+def test_vision_is_not_offered_when_it_cannot_be_served():
+    """A tool that cannot work costs a step to discover, and the step is the cost."""
+    actuator = FakeActuator()
+    desk = Desktop(TreeReader(FakeBackend(tree("A"))), actuator, settle=0.0)
+    without = {t.spec.name for t in build_desktop_tools(desktop=desk)}
+    assert "find_on_screen" not in without
+
+
+def test_the_zero_cost_ratio_counts_what_tools_reported():
+    from victor.agent.loop import AgentResult, Outcome, Step
+    from victor.tools.base import ToolResult
+
+    def step(*costs: int) -> Step:
+        calls = tuple(
+            (f"call{i}", ToolResult(ok=True, metadata={"cost": c}))
+            for i, c in enumerate(costs)
+        )
+        return Step(index=0, reply=None, calls=calls)
+
+    result = AgentResult(
+        task="t", answer="a", outcome=Outcome.ANSWERED, steps=[step(0, 0, 0), step(0, 1)]
+    )
+    assert result.free_tool_calls == 4
+    assert result.billed_tool_calls == 1
+    assert result.zero_cost_ratio == 0.8
+    # Two think-act cycles plus the one billed tool call.
+    assert result.api_calls == 3
+    assert "4/5 tool calls free" in result.summary()
+
+
+def test_a_run_that_touched_no_tools_is_not_reported_as_free():
+    from victor.agent.loop import AgentResult, Outcome
+
+    result = AgentResult(task="t", answer="a", outcome=Outcome.ANSWERED)
+    assert result.zero_cost_ratio == 1.0
+    assert "no tool calls" in result.summary()
+
+
 def test_the_desktop_tools_are_absent_unless_asked_for():
     """The capability is missing rather than discouraged."""
     from victor.config import Settings

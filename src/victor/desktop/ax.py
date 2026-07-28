@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .elements import Rect
+from .session import session_locked
 from .uia import PerceptionUnavailable
 
 #: AX roles mapped onto the control-type vocabulary the rest of Victor uses.
@@ -139,6 +140,14 @@ class AXBackend:
                 "Grant it in System Settings > Privacy & Security > Accessibility, "
                 "then run this again."
             )
+
+        # Checked after permission, because a locked screen is the more
+        # confusing of the two: permission failures announce themselves, while
+        # a locked screen answers every question and just leaves out the
+        # geometry. See victor.desktop.session.
+        locked, why = session_locked()
+        if locked:
+            return False, why
         return True, "macOS Accessibility ready"
 
     # -- attributes --------------------------------------------------------

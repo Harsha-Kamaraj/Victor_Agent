@@ -107,7 +107,9 @@ class _DesktopTool:
             ok=result.ok,
             output=result.for_model() if result.ok else "",
             error=None if result.ok else result.detail,
-            metadata={"method": result.method, "window": result.window},
+            # cost 0 is stated rather than left to default: it is the claim the
+            # whole project rests on, and AgentResult counts it.
+            metadata={"method": result.method, "window": result.window, "cost": 0},
         )
 
     def _refuse_terminal(self, what: str) -> ToolResult | None:
@@ -177,6 +179,18 @@ class ScreenReadTool(_DesktopTool):
                 )
             body = "\n".join(e.render() for e in matches[:limit])
             return ToolResult(ok=True, output=f"{snapshot.window_title}\n{body}")
+
+        if snapshot.empty:
+            # Two different empties, and they need different responses. A window
+            # that could not be measured wants bringing into view; one with no
+            # readable tree is what the vision fallback exists for.
+            advice = snapshot.note or (
+                f"{snapshot.window_title} reports no readable controls. "
+                "This happens with canvases, games and some Electron apps. "
+                "Try find_on_screen if it is available, or open_app to move "
+                "to an application with a usable tree."
+            )
+            return ToolResult(ok=True, output=advice, metadata={"elements": 0, "cost": 0})
 
         return ToolResult(
             ok=True,
@@ -322,6 +336,92 @@ class ScrollTool(_DesktopTool):
         return self._guard(self.desktop.scroll, int(amount), str(direction))
 
 
+class FindOnScreenTool(_DesktopTool):
+    """The vision fallback, and the only tool here that costs anything.
+
+    Exists for the surfaces with no usable tree - a canvas, a game, an Electron
+    app that reports one giant unlabelled group. Everything else in this module
+    is free and instant, and this one is neither, so it says so in its own
+    description: the model is told the price before it chooses to pay it.
+
+    It reports ``cost: 1`` in its metadata, which is what makes
+    ``AgentResult.zero_cost_ratio`` a measurement rather than a slogan.
+    """
+
+    def __init__(self, desktop: Desktop, vision: Any, capture: Any) -> None:
+        super().__init__(desktop)
+        self.vision = vision
+        self.capture = capture
+        self.spec = ToolSpec(
+            name="find_on_screen",
+            description=(
+                "Ask a vision model which element matches a description. Use this "
+                "ONLY when screen_read did not list what you need - it spends one "
+                "of a small daily allowance of image requests, while screen_read "
+                "is free and unlimited. Returns an element index you can click."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "description": {
+                        "type": "string",
+                        "description": "What to look for, e.g. 'the blue Send button'.",
+                    }
+                },
+                "required": ["description"],
+            },
+            mutating=False,
+        )
+
+    def run(self, description: str) -> ToolResult:
+        from ..desktop.vision import VisionUnavailable, annotate
+
+        try:
+            snapshot = self.desktop.snapshot(refresh=True)
+        except (PerceptionUnavailable, ActuationUnavailable) as exc:
+            return ToolResult(ok=False, error=str(exc), metadata={"available": False})
+
+        region = None
+        if snapshot.rect is not None and not snapshot.rect.empty:
+            rect = snapshot.rect
+            region = (rect.left, rect.top, rect.width, rect.height)
+
+        try:
+            shot, is_new = self.capture.capture(region)
+            answer = self.vision.locate(description, annotate(shot, snapshot), snapshot)
+        except VisionUnavailable as exc:
+            # Running out of vision has to leave a working agent. Say what
+            # remains possible rather than reporting a bare failure.
+            return ToolResult(
+                ok=False,
+                error=(
+                    f"{exc}. screen_read still works and costs nothing - try that, "
+                    "or scroll and read again."
+                ),
+                metadata={"cost": 1, "quota": "exhausted"},
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed look is not a crash
+            return ToolResult(ok=False, error=f"could not look at the screen: {exc}")
+
+        metadata = {"cost": 1, "model": answer.model, "cached_screen": not is_new}
+        if not answer.found:
+            return ToolResult(
+                ok=True,
+                output=f"Nothing on screen matches {description!r}.",
+                metadata=metadata,
+            )
+        return ToolResult(
+            ok=True,
+            output=(
+                f"{answer} - click index {answer.index} with label "
+                f"{answer.element.label!r}."
+                if answer.element
+                else str(answer)
+            ),
+            metadata=metadata | {"index": answer.index},
+        )
+
+
 class FocusAppTool(_DesktopTool):
     """Bring an application forward, or start it."""
 
@@ -368,15 +468,20 @@ def build_desktop_tools(
     desktop: Desktop | None = None,
     kill_switch: Any | None = None,
     app: str | None = None,
+    vision: Any | None = None,
 ) -> list[Any]:
     """The desktop tool set, sharing one façade.
 
     Constructing :class:`Desktop` does not touch the operating system - the
     backends load lazily - so this is safe to call on a machine with no
     accessibility support. The tools report the reason when used.
+
+    ``find_on_screen`` appears only when a vision client is supplied. Offering a
+    tool that cannot be served would spend a step to learn that, and the step is
+    the expensive part.
     """
     shared = desktop or Desktop(kill_switch=kill_switch, app=app)
-    return [
+    tools: list[Any] = [
         ScreenReadTool(shared),
         ClickTool(shared),
         TypeTextTool(shared),
@@ -384,3 +489,8 @@ def build_desktop_tools(
         ScrollTool(shared),
         FocusAppTool(shared),
     ]
+    if vision is not None:
+        from ..desktop.capture import ScreenCapture
+
+        tools.append(FindOnScreenTool(shared, vision, ScreenCapture()))
+    return tools

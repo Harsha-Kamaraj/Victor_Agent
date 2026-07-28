@@ -145,6 +145,13 @@ class Snapshot:
     truncated: bool = False
     duration_ms: float = 0.0
     backend: str = ""
+    note: str = ""
+    """Why this snapshot is emptier than expected, when the walk can tell.
+
+    An empty list has two very different causes - a window genuinely without
+    controls, and a window Victor could not measure - and they need different
+    responses from both the user and the model. Reporting "0 elements" for both
+    sends everyone looking in the wrong place."""
 
     def __len__(self) -> int:
         return len(self.elements)
@@ -175,6 +182,8 @@ class Snapshot:
             lines.append(f"... {len(self.elements) - limit} more not shown")
         if self.truncated:
             lines.append("... tree walk hit its limit; some elements are missing")
+        if self.note:
+            lines.append(f"... {self.note}")
         return "\n".join(lines)
 
     @property

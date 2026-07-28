@@ -82,11 +82,46 @@ class AgentResult:
     def tool_calls(self) -> list[tuple[ToolCall, ToolResult]]:
         return [pair for step in self.steps for pair in step.calls]
 
+    # -- what the run cost -------------------------------------------------
+    #
+    # The project's claim is that most of what an agent does on a desktop needs
+    # no API call at all, because the operating system already knows what is on
+    # screen. A claim like that is worth nothing unless it is counted, so tools
+    # report what they spent in ``metadata["cost"]`` - requests, not dollars -
+    # and these three properties are what turn that into the number quoted in
+    # the README.
+
+    @property
+    def billed_tool_calls(self) -> int:
+        """Tool calls that spent a provider request. Vision is the only one."""
+        return sum(1 for _, res in self.tool_calls if res.metadata.get("cost", 0))
+
+    @property
+    def free_tool_calls(self) -> int:
+        return len(self.tool_calls) - self.billed_tool_calls
+
+    @property
+    def api_calls(self) -> int:
+        """Provider requests: one per think-act cycle, plus any billed tool."""
+        return len(self.steps) + self.billed_tool_calls
+
+    @property
+    def zero_cost_ratio(self) -> float:
+        """Share of tool calls that cost nothing. 1.0 when nothing was billed."""
+        total = len(self.tool_calls)
+        return 1.0 if not total else self.free_tool_calls / total
+
     def summary(self) -> str:
         tools = ", ".join(str(call) for call, _ in self.tool_calls) or "none"
+        cost = (
+            f"{self.free_tool_calls}/{len(self.tool_calls)} tool calls free"
+            if self.tool_calls
+            else "no tool calls"
+        )
         return (
-            f"{self.outcome} in {len(self.steps)} steps, {self.total_tokens} tokens, "
-            f"{self.duration_ms:.0f}ms; tools: {tools}"
+            f"{self.outcome} in {len(self.steps)} steps, {self.api_calls} API calls, "
+            f"{self.total_tokens} tokens, {self.duration_ms:.0f}ms; "
+            f"{cost}; tools: {tools}"
         )
 
 
@@ -299,6 +334,16 @@ def build_agent(
     router = Router(settings, ledger, on_select=trace.selection)
 
     if registry is None:
+        use_desktop = desktop if desktop is not None else settings.desktop_control
+        vision = None
+        if use_desktop:
+            from ..desktop.vision import VisionClient
+
+            # Only built alongside the desktop tools: the vision fallback exists
+            # to read surfaces the tree cannot, and there is nothing to fall
+            # back from when the agent is not looking at a screen.
+            vision = VisionClient(settings, router, trace=trace)
+
         journal = ActionJournal(settings.paths.journal_file, session=trace.session_id)
         trash = trash_for(settings.data_dir, trace.session_id)
         interceptor = SafetyInterceptor(
@@ -318,8 +363,9 @@ def build_agent(
             interceptor=interceptor,
             kill_switch=kill_switch,
             trash=trash,
-            desktop=desktop,
+            desktop=use_desktop,
             app=app,
+            vision=vision,
         )
 
     return Agent(
