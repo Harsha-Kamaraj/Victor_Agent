@@ -1,5 +1,6 @@
 """Safety and reversibility: classify, gate, record, reverse, abort."""
 
+from .adjudicate import AdjudicationStats, LLMAdjudicator, build_adjudicator
 from .classify import (
     Classification,
     Risk,
@@ -35,7 +36,10 @@ from .undo import undo_entry, undo_last
 __all__ = [
     "Aborted",
     "ActionJournal",
+    "AdjudicationStats",
     "AutoConfirmer",
+    "LLMAdjudicator",
+    "build_adjudicator",
     "Classification",
     "ConfirmRequest",
     "Confirmer",

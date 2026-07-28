@@ -46,6 +46,15 @@ class Classification:
     reason: str
     trigger: str = ""
     """The segment or argument responsible, for showing the user."""
+    unmatched: bool = False
+    """No rule recognised this; the verdict is the fail-closed default.
+
+    Only these are worth spending an LLM call on. A command the rules already
+    understand does not get a second opinion - the rules are deterministic,
+    auditable and free, and an LLM that could overrule them would make the
+    whole classifier only as trustworthy as its weakest layer."""
+    source: str = "rule"
+    """Which layer produced this: ``rule``, ``llm``, or ``llm-failed``."""
 
     @property
     def needs_confirmation(self) -> bool:
@@ -250,8 +259,14 @@ def _classify_segment(segment: str) -> Classification:
     if name in KNOWN_MUTATING:
         return Classification(Risk.CONFIRM, f"{name} {KNOWN_MUTATING[name]}", segment)
 
-    # Fail closed. An unrecognised command is not a safe command.
-    return Classification(Risk.CONFIRM, f"{name} is not a known read-only command", segment)
+    # Fail closed. An unrecognised command is not a safe command - but flag it
+    # as unmatched so the adjudication layer can offer a second opinion.
+    return Classification(
+        Risk.CONFIRM,
+        f"{name} is not a known read-only command",
+        segment,
+        unmatched=True,
+    )
 
 
 def _classify_git_shell(args: list[str], segment: str) -> Classification:

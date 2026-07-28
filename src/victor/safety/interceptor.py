@@ -61,7 +61,9 @@ class SafetyInterceptor:
         require_confirmation: bool = True,
         trash: Any | None = None,
         cwd: Any | None = None,
+        adjudicator: Any | None = None,
     ) -> None:
+        self.adjudicator = adjudicator
         self.confirmer = confirmer or DenyingConfirmer()
         self.kill_switch = kill_switch
         self.journal = journal
@@ -85,12 +87,19 @@ class SafetyInterceptor:
             return self._record(spec, arguments, Decision.DENY, "run was stopped", None, summary)
 
         verdict = classify(spec.name, arguments, mutating=spec.mutating)
+
+        # Third layer. Only consulted for commands no rule recognised, and it
+        # can only clear them to SAFE - escalation stays with the rules.
+        if self.adjudicator is not None and verdict.unmatched:
+            verdict = self.adjudicator.review(summary, verdict)
+
         self.trace.event(
             "safety.classify",
             tool=spec.name,
             command=summary,
             risk=str(verdict.risk),
             reason=verdict.reason,
+            source=verdict.source,
         )
 
         if verdict.risk is Risk.DENY:

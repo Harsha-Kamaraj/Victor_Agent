@@ -277,7 +277,13 @@ def build_agent(
     confirmer: Any | None = None,
 ) -> Agent:
     """Wire an agent with the standard router, tools, client and safety layer."""
-    from ..safety import ActionJournal, SafetyInterceptor, build_confirmer, trash_for
+    from ..safety import (
+        ActionJournal,
+        SafetyInterceptor,
+        build_adjudicator,
+        build_confirmer,
+        trash_for,
+    )
 
     trace = trace or Trace.disabled()
     workdir = Path(cwd or Path.cwd())
@@ -295,6 +301,8 @@ def build_agent(
             dry_run=settings.dry_run,
             require_confirmation=settings.confirm_destructive,
             trash=trash,
+            cwd=workdir,
+            adjudicator=build_adjudicator(settings, ledger, trace=trace),
         )
         registry = build_registry(
             settings,
