@@ -152,8 +152,8 @@ def test_a_trashed_delete_is_declared_recoverable(tmp_path: Path) -> None:
     gate.review(SHELL, {"command": "rm notes.txt"})
 
     hint = confirmer.requests[0].undo_hint
-    assert "to the trash" in hint
     assert "victor undo" in hint
+    assert "off the disk" in hint
     assert "cannot be undone" not in hint
 
 
@@ -562,3 +562,24 @@ def test_the_kill_switch_reaps_the_whole_process_tree(tmp_path: Path) -> None:
     marker.unlink(missing_ok=True)
     time.sleep(0.4)
     assert not marker.exists(), "a grandchild process outlived the kill switch"
+
+
+def test_the_spoken_prompt_is_punctuated_into_sentences(tmp_path: Path) -> None:
+    """Piper emits one chunk per sentence, so full stops are what let a long
+    prompt start playing before it has finished generating."""
+    from victor.safety.trash import Trash
+
+    for name in ("a.log", "b.log"):
+        (tmp_path / name).write_text("x" * 100, encoding="utf-8")
+
+    confirmer = AutoConfirmer(True)
+    gate = interceptor(
+        confirmer=confirmer, trash=Trash(tmp_path / "trash", "s1"), cwd=tmp_path
+    )
+    gate.review(SHELL, {"command": "rm *.log"})
+
+    spoken = confirmer.requests[0].spoken()
+    assert ".." not in spoken
+    assert "more This" not in spoken  # the missing full stop this guards
+    assert spoken.count(".") >= 3
+    assert spoken.endswith("Say yes to continue, or no to stop.")

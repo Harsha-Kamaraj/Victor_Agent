@@ -48,15 +48,19 @@ class ConfirmRequest:
 
     def spoken(self) -> str:
         """Phrasing for text-to-speech: short sentences, no punctuation soup."""
-        lines = [f"I want to run {self.summary}."]
-        if self.preview:
-            lines.append(spoken_preview(self.preview))
-        else:
-            lines.append(f"This {self.classification.reason}.")
+        lines = [f"I want to run {self.summary}"]
+        lines.append(
+            spoken_preview(self.preview) if self.preview else f"This {self.classification.reason}"
+        )
         if self.undo_hint:
             lines.append(self.undo_hint)
-        lines.append("Say yes to continue, or no to stop.")
-        return " ".join(lines)
+        lines.append("Say yes to continue, or no to stop")
+        # Speech synthesis needs the full stops to pace the sentences, and
+        # Piper emits one audio chunk per sentence - so the punctuation is what
+        # makes a long prompt start playing before it has finished generating.
+        # Backticks are for a terminal, not a speaker.
+        spoken = " ".join(line.rstrip(". ") + "." for line in lines if line.strip())
+        return spoken.replace("`", "")
 
     def written(self) -> str:
         parts = [self.summary, f"  {self.classification.reason}"]

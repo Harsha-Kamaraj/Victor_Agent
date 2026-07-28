@@ -187,15 +187,14 @@ class SafetyInterceptor:
         is a move.
         """
         if self.trash is not None and tool == "shell":
-            from .trash import describe as describe_delete
             from .trash import parse_delete
 
-            plan = parse_delete(str(arguments.get("command", "")), self.cwd)
-            if plan is not None:
-                return (
-                    f"This moves {describe_delete(plan)} to the trash, "
-                    "not off the disk. `victor undo` puts it back."
-                )
+            if parse_delete(str(arguments.get("command", "")), self.cwd) is not None:
+                # Deliberately does not re-list the files: the preview above
+                # already named them, and hearing the same list twice is how a
+                # spoken prompt becomes something to sit through rather than
+                # listen to.
+                return "Nothing is deleted off the disk - victor undo puts it back."
 
         undo, why_not = plan_undo(tool, arguments, ok=True)
         if undo is not None:
