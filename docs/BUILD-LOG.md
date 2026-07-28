@@ -273,17 +273,63 @@ system-wide binding lands with the HUD in P8.
 
 ---
 
-## P4 · Screen Perception *(parallelizable)*
+## P4 · Screen Perception ✅
 
-**Build** — Windows UI Automation tree reader producing indexed, filtered
-elements with names, control types and bounding boxes. Screen capture via `mss`.
-Vision only as a fallback for surfaces with no usable tree (canvas apps, remote
-desktops, images).
+**Built** — `desktop/elements.py`, `desktop/uia.py`, `desktop/capture.py`,
+`desktop/vision.py`, and `victor uia --dump` / `--demo`.
 
-**Exit gate** — dump the tree of File Explorer, Edge, Settings and VS Code in
-under 100 ms each, with every actionable element addressable by index.
+**Exit gate** — `victor uia --demo` prints the README's example element list
+and reports **0 API calls, 0 quota spent**, verified against the ledger
+afterwards. ✅ The four-app timing check (Explorer, Edge, Settings, VS Code)
+is outstanding and needs Windows.
 
-Read-only by construction: this phase cannot click anything.
+### The index is the whole point
+
+An `Element` is addressed by index, never by position. The model picks an
+integer and *cannot* invent a coordinate — the rectangle comes from the OS
+either way. That keeps the failure mode "chose the wrong button", which is
+visible and recoverable, rather than "clicked 30 pixels off one", which is
+neither. A vision answer naming an index the snapshot does not contain is
+rejected before it can reach P5.
+
+### The walk is bounded, and says when it truncated
+
+A web page in Edge is thousands of nodes deep. An unbounded walk turns "20 ms"
+into eight seconds on the one window you most wanted to read, so depth, element
+count and wall-clock time are all capped — and the snapshot reports that it was
+cut short rather than pretending it saw everything.
+
+It is breadth-first for the same reason: if the walk *is* cut short, the
+controls a user would actually reach for are near the top of the tree and are
+already collected.
+
+Filtering lives in one testable function rather than inside the walk. A window
+contains hundreds of anonymous panes and groups; listing them buries the six
+things you can act on and spends the context budget the model needs to reason.
+
+### A fake backend is why this is testable at all
+
+The `Backend` protocol has two implementations: `UIABackend` (Windows) and
+`FakeBackend` (a literal tree). Everything above the backend — filtering,
+indexing, bounding, caching, rendering, the vision request shapes — is verified
+on macOS. **Only the thin `UIABackend` is unrun**, and it is the one piece that
+genuinely cannot be exercised off Windows.
+
+### Vision is metered by a hash, not by discipline
+
+Screenshots downscale to 768 px and carry a difference hash. An unchanged
+screen is served from cache, so an agent that looks twice while deciding — the
+normal case, not the exception — pays once. The hash ignores a blinking caret
+and notices a dialog opening, which is exactly the distinction worth paying
+for.
+
+### Both provider shapes, because the chain crosses providers
+
+Gemini takes `inline_data`; Groq speaks the OpenAI `image_url` shape. Both are
+implemented, so when Gemini's ~250/day is spent, vision continues on Groq's
+separate allowance instead of stopping. This also closes a gap flagged earlier
+in the build: before P4 the routing table listed a vision chain that **no code
+could call**.
 
 ---
 

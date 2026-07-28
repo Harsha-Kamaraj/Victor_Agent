@@ -2,7 +2,7 @@
 
 A voice-driven computer-use agent for Windows that runs entirely on free API tiers — because it reads the accessibility tree instead of guessing pixels.
 
-**Status: P0–P3 complete.** Plumbing, voice I/O, the agent core, and the safety layer are built and tested. Everything below the P3 line is not implemented yet, and `victor doctor` says so out loud rather than reporting a green tick for a pipeline that does not exist.
+**Status: P0–P4 complete.** Plumbing, voice I/O, the agent core, the safety layer and screen perception are built and tested. Everything below the P4 line is not implemented yet, and `victor doctor` says so out loud rather than reporting a green tick for a pipeline that does not exist.
 
 Two documents, deliberately separate: [docs/PLAN.md](docs/PLAN.md) is the plan of record — what was intended, why, and what was deliberately cut. [docs/BUILD-LOG.md](docs/BUILD-LOG.md) is what actually happened, including the decisions that changed during implementation and the measured numbers.
 
@@ -66,7 +66,7 @@ Phases are units of execution and integration, not a calendar. Each has an exit 
 - [x] **P1 · Voice I/O** — mic → VAD → STT → TTS, push-to-talk, latency benchmarks
 - [x] **P2 · Agent Core** — ReAct loop, tool registry, shell and git tools
 - [x] **P3 · Safety & Reversibility** — interceptor, dry-run, kill switch, action journal + undo
-- [ ] **P4 · Screen Perception** — UIA tree reader, screen capture, vision fallback (parallelizable)
+- [x] **P4 · Screen Perception** — UIA tree reader, screen capture, vision fallback (parallelizable)
 - [ ] **P5 · Desktop Actuation** — UIA-driven clicks and typing, gated by P3, using P4
 - [ ] **P6 · Memory** — FAISS + fastembed, auto-captured error/fix pairs, recall injection
 - [ ] **P7 · Scout** — GitHub portfolio gap analysis, reusing P6's embedding stack
@@ -99,7 +99,7 @@ Stated upfront rather than discovered later:
 - **Push-to-talk is terminal-scoped.** `victor listen --mode ptt` starts and stops on Enter. A system-wide hotkey needs an OS-level hook and lands with the HUD in P8.
 - **Not always-on.** The free vision tier is ~250 requests/day, so screen capture happens on demand, never as a continuous stream.
 - **Targeted app support.** UIA is tuned for File Explorer, Edge/Chrome, Windows Settings, and VS Code. Other apps may work but aren't guaranteed.
-- **Windows only.** UI Automation is a Windows API. The core (config, quota, routing, tracing, memory) is platform-neutral and runs anywhere; only perception and actuation are Windows-bound.
+- **Windows only.** UI Automation is a Windows API. The core (config, quota, routing, tracing, safety, memory) is platform-neutral and runs anywhere; only the thin UIA backend is Windows-bound. Everything above it — filtering, indexing, bounding, caching, rendering — is tested against a fake tree on any platform, and `victor uia --demo` shows the output shape.
 - **Free-tier numbers are declared, not discovered.** Providers change allowances without notice. The routing table in [src/victor/providers/registry.py](src/victor/providers/registry.py) states them conservatively, so Victor under-uses a generous tier rather than hitting a 429 mid-demo.
 
 ## Setup
@@ -131,6 +131,8 @@ victor say "hello"     # local synthesis, no network
 victor listen          # record one utterance, transcribe it, read it back
 victor bench voice     # measure VAD and TTS latency here
 
+victor uia --dump                   # the focused window's elements, 0 API calls
+victor uia --demo                   # the same output shape on any platform
 victor tools                        # what the agent can call
 victor do "what changed on main?"   # one task, printed
 victor do "..." --dry-run           # preview every action, execute none

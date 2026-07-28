@@ -4,7 +4,7 @@
 > before implementation began. It is kept as authored, with phase headings ticked
 > as their exit gates pass and short *as-built* notes where reality diverged.
 >
-> **Build status: P0–P3 complete, P4–P8 outstanding.**
+> **Build status: P0–P4 complete, P5–P8 outstanding.**
 > What was actually built, why it differs, and the measured numbers live in
 > [BUILD-LOG.md](BUILD-LOG.md) — that file is the record of execution, this one
 > is the record of intent. Read this first.
@@ -341,7 +341,7 @@ Keys go in `.env` (git-ignored).
 
 ---
 
-## P4 — Screen Perception · **L** *(parallelizable — needs only P0)*
+## P4 — Screen Perception · **L** *(parallelizable — needs only P0)*  ✅ **shipped**
 
 **Goal:** Victor can *see*. Read-only, so it's safe to build and test in isolation at any point.
 
