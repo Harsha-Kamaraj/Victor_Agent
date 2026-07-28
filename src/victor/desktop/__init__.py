@@ -21,7 +21,7 @@ from .actions import (
     normalise_label,
     select_actuator,
 )
-from .ax import AXBackend, list_applications
+from .ax import AXBackend, mac_applications
 from .capture import (
     CaptureUnavailable,
     ScreenCapture,
@@ -40,6 +40,7 @@ from .uia import (
     UnsupportedBackend,
     WalkLimits,
     demo_tree,
+    list_applications,
     select_backend,
 )
 from .vision import VisionAnswer, VisionClient, VisionUnavailable, annotate
@@ -80,6 +81,7 @@ __all__ = [
     "hamming",
     "is_interesting",
     "list_applications",
+    "mac_applications",
     "perceptual_hash",
     "select_backend",
 ]

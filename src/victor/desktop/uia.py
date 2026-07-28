@@ -24,6 +24,7 @@ for filtering, indexing, caching and rendering runs everywhere.
 
 from __future__ import annotations
 
+import contextlib
 import platform
 import time
 from dataclasses import dataclass
@@ -76,7 +77,8 @@ class UIABackend:
 
     name = "uia"
 
-    def __init__(self) -> None:
+    def __init__(self, app_name: str | None = None) -> None:
+        self.app_name = app_name
         self._auto = None
 
     def _load(self):
@@ -110,30 +112,83 @@ class UIABackend:
 
     def focused_window(self) -> Any | None:
         auto = self._load()
+        if self.app_name:
+            return self._named_window(auto, self.app_name)
+
         try:
             control = auto.GetFocusedControl()
         except Exception:
             control = None
         if control is None:
             return auto.GetForegroundControl()
-        # Climb to the owning top-level window: the focused control is usually
-        # a text box, and the agent wants everything in its window.
+
+        # Climb to the owning top-level window. The focused control is usually
+        # a list item or a text box, and the agent wants everything in its
+        # window - the toolbar especially, since that is where the verbs are.
+        #
+        # The stopping rule used to be "the parent is a Pane", on the theory
+        # that the desktop root is a Pane. It is, but so is most of File
+        # Explorer's internal scaffolding, and the climb stopped five levels
+        # early:
+        #
+        #     ListControl   'Items View'                <- stopped here
+        #     PaneControl   'Shell Folder View'
+        #     PaneControl   'Folder Layout Pane'
+        #     PaneControl   'Explorer Pane'
+        #     PaneControl   ''
+        #     PaneControl   'Downloads'
+        #     WindowControl 'Downloads - File Explorer'  <- wanted this
+        #     PaneControl   'Desktop 1'                  <- avoiding this
+        #
+        # That cost 101 of 248 elements, including Back, Forward, the address
+        # bar, and every toolbar verb. Stopping at the first WindowControl gets
+        # the right node and still never reaches the desktop root, because the
+        # root sits above it.
         node = control
         for _ in range(MAX_DEPTH):
-            parent = node.GetParentControl()
-            if parent is None or parent.ControlTypeName == "PaneControl":
+            if _control_type(node) == "WindowControl":
+                return node
+            try:
+                parent = node.GetParentControl()
+            except Exception:
+                break
+            if parent is None:
                 break
             node = parent
-            if node.ControlTypeName == "WindowControl":
-                break
-        return node
+
+        # No WindowControl ancestor: either an application whose top level is
+        # not a window, or a climb that ran out of depth. The foreground window
+        # is a better answer than a node halfway up somebody's scaffolding.
+        return auto.GetForegroundControl() or control
+
+    def _named_window(self, auto: Any, name: str) -> Any:
+        """Find a top-level window by name, for ``--app``.
+
+        Windows first, then Panes: most applications present a WindowControl at
+        the top level, but a few (and the Explorer shell in some views) present
+        a Pane, and a name that matches nothing is worth more than a window that
+        was not asked for.
+        """
+        for attribute in ("WindowControl", "PaneControl"):
+            control = getattr(auto, attribute, None)
+            if control is None:
+                continue
+            try:
+                window = control(searchDepth=1, SubName=name)
+                if window.Exists(maxSearchSeconds=2):
+                    return window
+            except Exception:
+                continue
+        raise PerceptionUnavailable(
+            f"no top-level window matches {name!r}. "
+            "`victor uia --apps` lists what can be targeted."
+        )
 
     def window_info(self, window: Any) -> tuple[str, str, Rect]:
         title = getattr(window, "Name", "") or "<untitled>"
-        try:
-            process = str(window.ProcessId)
-        except Exception:
-            process = "?"
+        process = "?"
+        with contextlib.suppress(Exception):
+            process = _process_name(int(window.ProcessId)) or str(window.ProcessId)
         return title, process, _rect_of(window)
 
     def children(self, node: Any) -> list[Any]:
@@ -155,6 +210,80 @@ class UIABackend:
         except Exception:
             value = ""
         return control_type, name, _rect_of(node), enabled, focused, value, automation_id
+
+
+def _control_type(node: Any) -> str:
+    """A node's UIA control type, tolerating a node that will not answer."""
+    try:
+        return str(getattr(node, "ControlTypeName", "") or "")
+    except Exception:
+        return ""
+
+
+def _process_name(pid: int) -> str:
+    """``explorer.exe`` rather than ``7412``.
+
+    A bare PID tells the model and the user nothing, and macOS reports an
+    application name here - so the two backends producing the same shape of
+    answer is worth a short ctypes call.
+    """
+    if platform.system() != "Windows" or pid <= 0:
+        return ""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000  # noqa: N806
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return ""
+        try:
+            size = wintypes.DWORD(260)
+            buffer = ctypes.create_unicode_buffer(size.value)
+            if not kernel32.QueryFullProcessImageNameW(
+                handle, 0, buffer, ctypes.byref(size)
+            ):
+                return ""
+            return buffer.value.rsplit("\\", 1)[-1]
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return ""
+
+
+def list_applications() -> list[str]:
+    """Names of windows that ``--app`` can target, for the running platform."""
+    system = platform.system()
+    if system == "Darwin":
+        from .ax import mac_applications
+
+        return mac_applications()
+    if system == "Windows":
+        return _windows_windows()
+    return []
+
+
+def _windows_windows() -> list[str]:
+    """Top-level window titles, deduplicated and in on-screen order."""
+    try:
+        import uiautomation
+    except ImportError:
+        return []
+    try:
+        children = uiautomation.GetRootControl().GetChildren()
+    except Exception:
+        return []
+
+    names: list[str] = []
+    for child in children:
+        if _control_type(child) not in ("WindowControl", "PaneControl"):
+            continue
+        name = str(getattr(child, "Name", "") or "").strip()
+        # The desktop itself is a named Pane and is not something to target.
+        if name and name not in names and not name.startswith("Desktop "):
+            names.append(name)
+    return names
 
 
 def _rect_of(node: Any) -> Rect:
@@ -357,7 +486,7 @@ def select_backend(*, app: str | None = None) -> Backend:
     """
     system = platform.system()
     if system == "Windows":
-        return UIABackend()
+        return UIABackend(app_name=app)
     if system == "Darwin":
         from .ax import AXBackend
 

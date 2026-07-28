@@ -22,6 +22,173 @@ from victor.providers import Router
 from victor.providers.registry import GEMINI_25_FLASH, LLAMA_4_SCOUT
 from victor.quota import QuotaLedger
 
+# --- climbing to the owning window ----------------------------------------
+#
+# UIABackend.focused_window is the one part of the Windows backend with a
+# decision in it, and it was wrong in a way no macOS test could see. These
+# drive the real backend against a fake `uiautomation`, so they run anywhere.
+
+
+class FakeUIAControl:
+    """Just enough of a uiautomation control to be climbed."""
+
+    def __init__(self, control_type: str, name: str = "") -> None:
+        self.ControlTypeName = control_type
+        self.Name = name
+        self.ProcessId = 4321
+        self.parent: FakeUIAControl | None = None
+
+    def GetParentControl(self):  # noqa: N802
+        return self.parent
+
+
+class FakeUIAModule:
+    def __init__(self, focused=None, foreground=None) -> None:
+        self._focused = focused
+        self._foreground = foreground
+
+    def GetFocusedControl(self):  # noqa: N802
+        return self._focused
+
+    def GetForegroundControl(self):  # noqa: N802
+        return self._foreground
+
+
+def chain(*nodes: FakeUIAControl) -> FakeUIAControl:
+    """Link deepest-first, and return the deepest."""
+    for child, parent in zip(nodes, nodes[1:], strict=False):
+        child.parent = parent
+    return nodes[0]
+
+
+def explorer_ancestry() -> FakeUIAControl:
+    """The ancestry Gagan measured in File Explorer on Windows 11."""
+    return chain(
+        FakeUIAControl("ListItemControl", "notes.txt"),
+        FakeUIAControl("ListControl", "Items View"),
+        FakeUIAControl("PaneControl", "Shell Folder View"),
+        FakeUIAControl("PaneControl", "Folder Layout Pane"),
+        FakeUIAControl("PaneControl", "Explorer Pane"),
+        FakeUIAControl("PaneControl", ""),
+        FakeUIAControl("PaneControl", "Downloads"),
+        FakeUIAControl("WindowControl", "Downloads - File Explorer"),
+        FakeUIAControl("PaneControl", "Desktop 1"),
+    )
+
+
+def uia_backend(focused=None, foreground=None, app: str | None = None):
+    from victor.desktop.uia import UIABackend
+
+    backend = UIABackend(app_name=app)
+    backend._auto = FakeUIAModule(focused=focused, foreground=foreground)
+    return backend
+
+
+def test_the_climb_passes_through_nested_panes_to_the_window():
+    """Explorer nests six panes; stopping at the first cost 101 elements."""
+    backend = uia_backend(focused=explorer_ancestry())
+    window = backend.focused_window()
+    assert window.ControlTypeName == "WindowControl"
+    assert window.Name == "Downloads - File Explorer"
+
+
+def test_the_climb_never_reaches_the_desktop_root():
+    """The thing the old Pane rule was actually guarding against."""
+    window = uia_backend(focused=explorer_ancestry()).focused_window()
+    assert window.Name != "Desktop 1"
+
+
+def test_the_climb_stops_at_the_innermost_window():
+    """A dialog is a WindowControl inside a WindowControl - take the dialog."""
+    backend = uia_backend(
+        focused=chain(
+            FakeUIAControl("ButtonControl", "Save"),
+            FakeUIAControl("PaneControl", "content"),
+            FakeUIAControl("WindowControl", "Save As"),
+            FakeUIAControl("WindowControl", "Document - Word"),
+        )
+    )
+    assert backend.focused_window().Name == "Save As"
+
+
+def test_a_control_already_at_the_window_is_returned_as_is():
+    window = FakeUIAControl("WindowControl", "Downloads - File Explorer")
+    assert uia_backend(focused=window).focused_window() is window
+
+
+def test_no_window_ancestor_falls_back_to_the_foreground():
+    """Better than a node halfway up somebody's scaffolding."""
+    foreground = FakeUIAControl("WindowControl", "Foreground")
+    backend = uia_backend(
+        focused=chain(
+            FakeUIAControl("ButtonControl", "x"),
+            FakeUIAControl("PaneControl", "y"),
+            FakeUIAControl("PaneControl", "Desktop 1"),
+        ),
+        foreground=foreground,
+    )
+    assert backend.focused_window() is foreground
+
+
+def test_app_targeting_is_honoured_on_windows():
+    """`--app` used to be accepted and silently ignored by this backend."""
+    wanted = FakeUIAControl("WindowControl", "Downloads - File Explorer")
+
+    class Module(FakeUIAModule):
+        def WindowControl(self, **kwargs):  # noqa: N802
+            wanted.searched = kwargs
+            wanted.Exists = lambda **_: True
+            return wanted
+
+    backend = uia_backend(focused=explorer_ancestry(), app="Downloads")
+    backend._auto = Module()
+    found = backend.focused_window()
+    assert found is wanted
+    assert found.searched["SubName"] == "Downloads"
+
+
+def test_an_unmatched_app_name_is_refused_rather_than_ignored():
+    from victor.desktop.uia import PerceptionUnavailable
+
+    class Module(FakeUIAModule):
+        def WindowControl(self, **kwargs):  # noqa: N802
+            missing = FakeUIAControl("WindowControl", "")
+            missing.Exists = lambda **_: False
+            return missing
+
+        PaneControl = WindowControl
+
+    backend = uia_backend(app="Nope")
+    backend._auto = Module()
+    with pytest.raises(PerceptionUnavailable, match="no top-level window"):
+        backend.focused_window()
+
+
+def test_window_info_reports_a_process_name_not_a_pid(monkeypatch):
+    """A bare PID tells nobody anything, and macOS reports a name here."""
+    from victor.desktop import uia as uia_module
+
+    monkeypatch.setattr(uia_module, "_process_name", lambda pid: "explorer.exe")
+    backend = uia_backend()
+    title, process, _ = backend.window_info(
+        FakeUIAControl("WindowControl", "Downloads - File Explorer")
+    )
+    assert title == "Downloads - File Explorer"
+    assert process == "explorer.exe"
+
+
+def test_window_info_falls_back_to_the_pid_when_the_name_is_unavailable(monkeypatch):
+    from victor.desktop import uia as uia_module
+
+    monkeypatch.setattr(uia_module, "_process_name", lambda pid: "")
+    _, process, _ = backend_info()
+    assert process == "4321"
+
+
+def backend_info():
+    return uia_backend().window_info(FakeUIAControl("WindowControl", "W"))
+
+
 # --- geometry -------------------------------------------------------------
 
 

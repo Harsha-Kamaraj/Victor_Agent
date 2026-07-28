@@ -859,7 +859,15 @@ def uia(
     if apps:
         names = list_applications()
         if not names:
-            console.print("[dim]no targetable applications (or not supported here)[/dim]")
+            # "no applications (or not supported)" told you nothing about which
+            # of the two it was. Both platforms can answer this now, so an empty
+            # list on either really does mean nothing is open.
+            if platform.system() not in ("Darwin", "Windows"):
+                console.print(
+                    f"[dim]listing windows is not supported on {platform.system()}[/dim]"
+                )
+            else:
+                console.print("[dim]no windows are open to target[/dim]")
             return
         for name in names:
             console.print(f"  {name}")

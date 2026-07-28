@@ -289,8 +289,12 @@ class AXBackend:
         )
 
 
-def list_applications() -> list[str]:
-    """Names of running applications that have a user interface."""
+def mac_applications() -> list[str]:
+    """Names of running applications that have a user interface.
+
+    Dispatched to by :func:`victor.desktop.uia.list_applications`, which is the
+    platform-neutral entry point the CLI uses.
+    """
     if platform.system() != "Darwin":
         return []
     try:

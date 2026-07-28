@@ -503,16 +503,19 @@ class WindowsActuator:
     def key(self, chord: keymap.Chord) -> ActionResult:
         auto = self._load()
         modifiers, code = keymap.windows_keycodes(chord)
+        # Record the intent *before* pressing anything. The obvious order -
+        # press, then append - leaves a window one statement wide where a key
+        # is physically down and untracked, so the `finally` below releases
+        # nothing. A COM error there, or a KeyboardInterrupt (which is how the
+        # kill switch is triggered), leaves Ctrl held down for the whole
+        # machine, not just for Victor.
+        self._held.extend(modifiers)
         try:
             for modifier in modifiers:
                 auto.PressKey(modifier)
-                self._held.append(modifier)
             auto.PressKey(code)
             auto.ReleaseKey(code)
         finally:
-            # Held modifiers outlive the process that pressed them. Releasing
-            # in reverse order, unconditionally, is the whole reason this method
-            # is not three lines.
             self.release_modifiers()
         return ActionResult(True, f"pressed {chord}", method="synthetic")
 
@@ -523,6 +526,18 @@ class WindowsActuator:
         return ActionResult(True, f"scrolled ({dx}, {dy}) lines", method="synthetic")
 
     def focus_app(self, name: str) -> ActionResult:
+        """Bring a window forward, and check that it actually came forward.
+
+        ``SetActive`` cannot beat the Windows foreground lock: when the calling
+        process is not itself in the foreground, the request is downgraded to
+        flashing the taskbar button, and it reports no error. Without the check
+        below this returned ``ok=True`` while the foreground window was still
+        whatever the user was using - the agent then read one window and typed
+        into another.
+
+        The verification is the fix. A workaround for the lock could be added on
+        top, but a workaround that is not verified is how this got here.
+        """
         auto = self._load()
         try:
             window = auto.WindowControl(searchDepth=1, SubName=name)
@@ -532,13 +547,42 @@ class WindowsActuator:
             window.SetTopmost(False)
         except Exception as exc:  # noqa: BLE001
             return ActionResult(False, f"could not focus {name!r}: {exc}")
+
         time.sleep(SETTLE_SECONDS)
-        return ActionResult(True, f"focused {name}", method="accessibility")
+        foreground = self._foreground_title(auto)
+        wanted = name.strip().casefold()
+        if wanted and wanted not in (foreground or "").casefold():
+            return ActionResult(
+                False,
+                f"asked Windows to focus {name!r} but the foreground window is "
+                f"{foreground or 'unknown'!r}. Windows refuses foreground changes "
+                "from a background process; click the window once, or start "
+                "Victor from a terminal that is already in front.",
+            )
+        return ActionResult(True, f"focused {foreground or name}", method="accessibility")
+
+    @staticmethod
+    def _foreground_title(auto: Any) -> str:
+        """The title of whatever is actually in front right now."""
+        try:
+            control = auto.GetForegroundControl()
+        except Exception:
+            return ""
+        return str(getattr(control, "Name", "") or "") if control is not None else ""
 
     def launch_app(self, name: str) -> ActionResult:
-        focused = self.focus_app(name)
-        if focused.ok:
-            return ActionResult(True, f"{name} was already running; brought it forward")
+        # Ask whether it is running *before* trying to focus it. Now that
+        # focus_app verifies its own result, it can fail for two unrelated
+        # reasons - not running, and running but blocked by the foreground lock
+        # - and launching a second copy is only right for the first.
+        auto = self._load()
+        running = False
+        with contextlib.suppress(Exception):
+            window = auto.WindowControl(searchDepth=1, SubName=name)
+            running = bool(window.Exists(maxSearchSeconds=1))
+        if running:
+            return self.focus_app(name)
+
         try:
             subprocess.Popen(  # noqa: S603 - name is validated upstream
                 ["cmd", "/c", "start", "", name],
@@ -552,13 +596,25 @@ class WindowsActuator:
         return ActionResult(True, f"launched {name}")
 
     def release_modifiers(self) -> None:
-        if not self._held:
+        """Release every modifier, tracked or not.
+
+        Unconditional, to match :meth:`MacActuator.release_modifiers`. Gating
+        this on ``_held`` made it depend on the bookkeeping being correct at
+        exactly the moment the bookkeeping was most likely to be wrong - and a
+        redundant ReleaseKey on a key that is already up does nothing, while a
+        missed one hands the user a machine where every keystroke is a shortcut.
+        """
+        if self._auto is None:
             return
         auto = self._auto
-        for modifier in reversed(self._held):
+        # Tracked ones first and in reverse, so a chord unwinds in the order it
+        # was built; then the full set, in case anything was pressed off-book.
+        ordered = list(reversed(self._held))
+        ordered += [c for c in keymap.WINDOWS_MODIFIER_CODES.values() if c not in ordered]
+        self._held.clear()
+        for modifier in ordered:
             with contextlib.suppress(Exception):
                 auto.ReleaseKey(modifier)
-        self._held.clear()
 
 
 # --- testing ---------------------------------------------------------------

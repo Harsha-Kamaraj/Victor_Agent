@@ -455,6 +455,138 @@ def test_terminal_detection(title, process, expected):
     assert looks_like_terminal(title, process) is expected
 
 
+# --- the real Windows actuator ---------------------------------------------
+#
+# Same trick as the macOS tests below: drive the real WindowsActuator against a
+# fake `uiautomation`. Both defects these cover were found on Gagan's machine
+# and neither is visible to FakeActuator, which records that a key was pressed
+# rather than whether it was ever let go.
+
+
+class FakeUIAuto:
+    """Enough of `uiautomation` to press keys and focus windows."""
+
+    def __init__(self, *, foreground: str = "", exists: bool = True) -> None:
+        self.down: list[int] = []
+        self.up: list[int] = []
+        self.foreground = foreground
+        self.exists = exists
+        self.fail_on: int | None = None
+        self.activated: list[str] = []
+
+    # keyboard
+    def PressKey(self, code):  # noqa: N802
+        # Record the key as down *before* raising. That is the shape of the
+        # real bug: the key physically went down, and something went wrong
+        # before the caller noted that it had. A fake that raises first never
+        # reproduces it and quietly passes against the broken code.
+        self.down.append(code)
+        if self.fail_on is not None and code == self.fail_on:
+            raise RuntimeError("COM error mid-chord")
+
+    def ReleaseKey(self, code):  # noqa: N802
+        self.up.append(code)
+
+    # windows
+    def WindowControl(self, **kwargs):  # noqa: N802
+        auto = self
+        name = kwargs.get("SubName", "")
+
+        class _Window:
+            def Exists(self, **_):  # noqa: N802
+                return auto.exists
+
+            def SetActive(self):  # noqa: N802
+                auto.activated.append(name)
+
+            def SetTopmost(self, value):  # noqa: N802
+                pass
+
+        return _Window()
+
+    def GetForegroundControl(self):  # noqa: N802
+        class _Control:
+            Name = self.foreground
+
+        return _Control()
+
+    @property
+    def still_down(self) -> set[int]:
+        """Keys pressed and never released - what a user would feel."""
+        return {code for code in self.down if self.down.count(code) > self.up.count(code)}
+
+
+def windows_actuator(**kwargs) -> tuple[object, FakeUIAuto]:
+    from victor.desktop.actions import WindowsActuator
+
+    actuator = WindowsActuator()
+    auto = FakeUIAuto(**kwargs)
+    actuator._auto = auto
+    return actuator, auto
+
+
+def test_a_normal_chord_leaves_no_key_down():
+    actuator, auto = windows_actuator()
+    actuator.key(keymap.parse("ctrl+shift+n", system="Windows"))
+    assert auto.still_down == set()
+
+
+def test_a_failure_mid_chord_leaves_no_key_down():
+    """The one-statement window where a key was down but untracked.
+
+    Reachable in practice: a COM error, or a KeyboardInterrupt - which is how
+    the kill switch is triggered. On Windows a stuck Ctrl affects the whole
+    machine, not just Victor.
+    """
+    actuator, auto = windows_actuator()
+    auto.fail_on = keymap.WINDOWS_MODIFIER_CODES["shift"]
+
+    with pytest.raises(RuntimeError):
+        actuator.key(keymap.parse("ctrl+shift+n", system="Windows"))
+
+    assert auto.still_down == set(), "a modifier was left physically held"
+    assert keymap.WINDOWS_MODIFIER_CODES["ctrl"] in auto.up
+
+
+def test_releasing_does_not_depend_on_the_bookkeeping():
+    """Unconditional, to match macOS - a redundant release costs nothing."""
+    actuator, auto = windows_actuator()
+    auto.down.append(keymap.WINDOWS_MODIFIER_CODES["alt"])  # pressed off-book
+    actuator.release_modifiers()
+    assert auto.still_down == set()
+
+
+def test_focus_app_reports_failure_when_the_window_did_not_come_forward():
+    """It used to claim success while the user's editor stayed in front."""
+    actuator, _ = windows_actuator(foreground="Victor - Visual Studio Code")
+    result = actuator.focus_app("Downloads")
+    assert result.ok is False
+    assert "Visual Studio Code" in result.detail
+    assert "foreground" in result.detail
+
+
+def test_focus_app_succeeds_when_the_window_really_is_in_front():
+    actuator, auto = windows_actuator(foreground="Downloads - File Explorer")
+    result = actuator.focus_app("Downloads")
+    assert result.ok is True
+    assert auto.activated == ["Downloads"]
+
+
+def test_a_missing_window_is_still_reported_as_missing():
+    actuator, _ = windows_actuator(exists=False)
+    result = actuator.focus_app("Nope")
+    assert result.ok is False
+    assert "no window matches" in result.detail
+
+
+def test_a_running_app_that_will_not_focus_is_not_launched_twice():
+    """focus_app now fails for two reasons; only one of them means "launch"."""
+    actuator, auto = windows_actuator(foreground="Something Else", exists=True)
+    result = actuator.launch_app("Downloads")
+    assert result.ok is False
+    assert "foreground" in result.detail
+
+
 # --- flag discipline in the real macOS actuator ----------------------------
 #
 # FakeActuator cannot catch this class of bug: it records that a key was
