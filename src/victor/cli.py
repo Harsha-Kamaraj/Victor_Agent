@@ -17,7 +17,7 @@ from .errors import VictorError
 from .providers import Router, Workload
 from .providers.registry import ROUTING_TABLE
 from .quota import QuotaLedger
-from .tracing import list_traces, read_trace
+from .tracing import Trace, list_traces, read_trace
 
 console = Console()
 err_console = Console(stderr=True)
@@ -29,6 +29,10 @@ app = typer.Typer(
 )
 trace_app = typer.Typer(help="Inspect session traces.", no_args_is_help=True)
 app.add_typer(trace_app, name="trace")
+voice_app = typer.Typer(help="Voice devices and models.", no_args_is_help=True)
+app.add_typer(voice_app, name="voice")
+bench_app = typer.Typer(help="Measured latency benchmarks.", no_args_is_help=True)
+app.add_typer(bench_app, name="bench")
 
 _STATUS_STYLE: dict[Status, tuple[str, str]] = {
     Status.OK: ("green", "OK"),
@@ -241,6 +245,173 @@ def trace_show(
         console.print(f"[dim]{event['seq']:>3}[/dim] [bold]{event['kind']}[/bold]{suffix}")
         for key, value in (event.get("payload") or {}).items():
             console.print(f"      [cyan]{key}[/cyan]: {value}")
+
+
+# --- voice ----------------------------------------------------------------
+
+
+@voice_app.command("devices")
+def voice_devices() -> None:
+    """List audio input and output devices."""
+    from .voice import list_devices
+
+    devices = list_devices()
+    if not devices:
+        err_console.print(
+            "[yellow]no audio devices[/yellow] - install with: pip install -e '.[voice]'"
+        )
+        raise typer.Exit(1)
+
+    table = Table(box=None)
+    table.add_column("#", justify="right")
+    table.add_column("name", style="bold")
+    table.add_column("in", justify="right")
+    table.add_column("out", justify="right")
+    table.add_column("default")
+
+    for d in devices:
+        marks = []
+        if d["default_input"]:
+            marks.append("input")
+        if d["default_output"]:
+            marks.append("output")
+        table.add_row(
+            str(d["index"]),
+            str(d["name"]),
+            str(d["inputs"]),
+            str(d["outputs"]),
+            Text(", ".join(marks), style="green"),
+        )
+    console.print(table)
+
+
+@voice_app.command("install")
+def voice_install(
+    voice: Annotated[str, typer.Option("--voice", help="Piper voice name.")] = "",
+    force: Annotated[bool, typer.Option("--force", help="Re-download.")] = False,
+) -> None:
+    """Download the Piper voice model (~63 MB, once)."""
+    from .voice import DEFAULT_VOICE, PiperSynthesizer
+
+    settings = _settings()
+    name = voice or DEFAULT_VOICE
+    synth = PiperSynthesizer(settings.paths.ensure().models_dir, name)
+
+    if synth.installed and not force:
+        console.print(f"[green]already installed[/green] {name} -> {synth.model_path}")
+        return
+
+    with console.status(f"downloading {name}..."):
+        path = synth.ensure_installed(force=force)
+    size_mb = path.stat().st_size / 1e6
+    console.print(f"[green]installed[/green] {name} ({size_mb:.0f} MB) -> {path}")
+
+
+@app.command()
+def say(
+    text: Annotated[str, typer.Argument(help="What to say.")],
+    backend: Annotated[
+        str, typer.Option("--backend", help="piper | system | null")
+    ] = "piper",
+    quiet: Annotated[
+        bool, typer.Option("--quiet", help="Synthesize without playing.")
+    ] = False,
+) -> None:
+    """Speak a line of text through the local synthesizer."""
+    from .voice import Player, build_synthesizer
+    from .voice import speak as do_speak
+
+    settings = _settings()
+    synth = build_synthesizer(settings.paths.ensure().models_dir, prefer=backend)
+    stats = do_speak(synth, Player(enabled=not quiet), text)
+    console.print(
+        f"[dim]{stats.backend}: {stats.audio_seconds:.2f}s audio, "
+        f"first sound in {stats.ttfa_ms:.0f}ms, "
+        f"synth {stats.synth_ms:.0f}ms (rtf {stats.realtime_factor:.2f})[/dim]"
+    )
+
+
+@app.command()
+def listen(
+    mode: Annotated[
+        str, typer.Option("--mode", help="vad | ptt | fixed")
+    ] = "vad",
+    seconds: Annotated[
+        float, typer.Option("--seconds", help="Recording length in fixed mode.")
+    ] = 5.0,
+    reply: Annotated[
+        bool, typer.Option("--reply/--no-reply", help="Speak an acknowledgement back.")
+    ] = True,
+) -> None:
+    """Record one utterance, transcribe it, and read it back.
+
+    P1 has no agent behind it yet, so the reply is an acknowledgement rather
+    than an answer. It exists to prove the full mic -> STT -> TTS round trip.
+    """
+    from .voice import ListenMode, NoSpeechDetected, build_pipeline
+
+    settings = _settings()
+    with Trace.open(settings.paths.ensure().traces_dir, label="listen") as trace:
+        pipeline = build_pipeline(settings, trace=trace)
+        try:
+            warm_ms = pipeline.warm() * 1000
+            if warm_ms:
+                console.print(f"[dim]voice model loaded in {warm_ms:.0f}ms[/dim]")
+
+            listen_mode = ListenMode(mode)
+            if listen_mode is ListenMode.PTT:
+                console.print("[bold]recording[/bold] - press Enter to stop")
+            else:
+                console.print("[bold]listening[/bold] - start speaking")
+
+            try:
+                turn = pipeline.listen(listen_mode, seconds=seconds)
+            except NoSpeechDetected:
+                err_console.print("[yellow]no speech detected[/yellow]")
+                raise typer.Exit(4) from None
+
+            console.print()
+            console.print(f"[bold cyan]heard:[/bold cyan] {turn.text or '(nothing)'}")
+            console.print(
+                f"[dim]{turn.endpoint.segment.duration:.2f}s audio "
+                f"({turn.endpoint.reason}), stt {turn.transcript.latency_ms:.0f}ms, "
+                f"{turn.transcript.model}[/dim]"
+            )
+
+            if reply and turn.text:
+                stats = pipeline.speak(f"You said: {turn.text}")
+                console.print(f"[dim]spoke in {stats.ttfa_ms:.0f}ms to first sound[/dim]")
+        finally:
+            pipeline.close()
+
+
+# --- benchmarks -----------------------------------------------------------
+
+
+@bench_app.command("voice")
+def bench_voice(
+    runs: Annotated[int, typer.Option("--runs", "-n")] = 5,
+    stt: Annotated[
+        bool, typer.Option("--stt", help="Also measure STT (spends audio quota).")
+    ] = False,
+    playback: Annotated[
+        bool, typer.Option("--playback", help="Play audio while timing.")
+    ] = False,
+) -> None:
+    """Measure VAD, TTS and optionally STT latency on this machine."""
+    from .voice.bench import bench_pipeline, summarise
+    from .voice.tts import PiperSynthesizer
+
+    settings = _settings()
+    synth = PiperSynthesizer(settings.paths.ensure().models_dir)
+    with console.status(f"benchmarking ({runs} runs)..."):
+        results = bench_pipeline(settings, runs=runs, synthesizer=synth, stt=stt)
+    console.print(summarise(results))
+    if not playback:
+        console.print(
+            "\n[dim]TTS measured without playback; add --playback to include "
+            "device write time.[/dim]"
+        )
 
 
 def main() -> None:

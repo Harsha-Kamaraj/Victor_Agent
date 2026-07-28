@@ -125,7 +125,7 @@ def _check_storage(settings: Settings) -> Iterator[Check]:
 def _check_dependencies() -> Iterator[Check]:
     """Optional extras, mapped to the phase that needs them."""
     groups = {
-        "voice (P1)": ("sounddevice", "numpy", "webrtcvad"),
+        "voice (P1)": ("sounddevice", "numpy", "piper"),
         "desktop (P4/P5)": ("mss", "PIL"),
         "memory (P6)": ("faiss", "fastembed"),
     }
@@ -191,11 +191,72 @@ def _probe(name: str, url: str, *, headers: dict[str, str], timeout: float) -> C
     return Check(name, Status.WARN, f"HTTP {response.status_code}")
 
 
+def _check_voice(settings: Settings) -> Iterator[Check]:
+    """P1: real capture, playback and synthesis availability."""
+    if find_spec("numpy") is None or find_spec("sounddevice") is None:
+        yield Check(
+            "microphone",
+            Status.SKIP,
+            "voice extra not installed",
+            hint="pip install -e '.[voice]'",
+        )
+        yield Check("speakers", Status.SKIP, "voice extra not installed")
+    else:
+        from .voice.sources import list_devices
+
+        devices = list_devices()
+        if not devices:
+            yield Check(
+                "microphone",
+                Status.FAIL,
+                "PortAudio found no devices",
+                hint="On macOS, grant the terminal microphone access in "
+                "System Settings > Privacy & Security.",
+            )
+            yield Check("speakers", Status.FAIL, "PortAudio found no devices")
+        else:
+            inputs = [d for d in devices if d["inputs"]]
+            outputs = [d for d in devices if d["outputs"]]
+            default_in = next((d for d in inputs if d["default_input"]), None)
+            default_out = next((d for d in outputs if d["default_output"]), None)
+
+            yield (
+                Check("microphone", Status.OK, f"{default_in['name']} (+{len(inputs) - 1} more)")
+                if default_in
+                else Check("microphone", Status.WARN, f"{len(inputs)} inputs, none default")
+            )
+            yield (
+                Check("speakers", Status.OK, str(default_out["name"]))
+                if default_out
+                else Check("speakers", Status.WARN, f"{len(outputs)} outputs, none default")
+            )
+
+    if find_spec("piper") is None:
+        yield Check(
+            "tts (piper)",
+            Status.SKIP,
+            "piper-tts not installed",
+            hint="pip install -e '.[voice]'",
+        )
+    else:
+        from .voice.tts import DEFAULT_VOICE, PiperSynthesizer
+
+        synth = PiperSynthesizer(settings.paths.models_dir, DEFAULT_VOICE)
+        if synth.installed:
+            size_mb = synth.model_path.stat().st_size / 1e6
+            yield Check("tts (piper)", Status.OK, f"{DEFAULT_VOICE} ({size_mb:.0f} MB)")
+        else:
+            yield Check(
+                "tts (piper)",
+                Status.WARN,
+                f"voice {DEFAULT_VOICE} not downloaded",
+                hint="victor voice install",
+            )
+
+
 def _check_pending() -> Iterator[Check]:
     """Capabilities the README promises that later phases will deliver."""
     on_windows = platform.system() == "Windows"
-    yield Check("microphone", Status.PENDING, "P1 not implemented")
-    yield Check("speakers / TTS", Status.PENDING, "P1 not implemented")
     yield Check("agent loop", Status.PENDING, "P2 not implemented")
     yield Check("safety interceptor", Status.PENDING, "P3 not implemented")
     if on_windows:
@@ -221,6 +282,7 @@ def run_checks(settings: Settings, *, network: bool = True) -> list[Check]:
     checks += list(_check_storage(settings))
     checks += list(_check_tooling())
     checks += list(_check_dependencies())
+    checks += list(_check_voice(settings))
     if network:
         checks += list(_check_network(settings))
     else:

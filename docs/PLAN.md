@@ -50,14 +50,71 @@ headroom, under-counting costs money.
 
 ---
 
-## P1 · Voice I/O
+## P1 · Voice I/O ✅
 
-**Build** — mic capture, WebRTC VAD for endpointing, Groq
-`whisper-large-v3-turbo` for STT, Piper ONNX for TTS. Push-to-talk first,
-because always-listening is a demo liability before the safety layer exists.
+**Built**
+- `voice/audio.py` — one representation end to end: int16 mono PCM at a
+  declared rate, plus WAV encode/decode, dBFS and resampling.
+- `voice/sources.py` — `AudioSource` protocol. `MicrophoneSource` for
+  PortAudio, `ArraySource` for tests and benchmarks. This split is why the
+  entire endpointing and transcription stack is testable with no audio
+  hardware.
+- `voice/vad.py` — `EnergyVad` (default) and an optional `WebRtcVad`, under an
+  `Endpointer` state machine with hysteresis, pre-roll and guard rails.
+- `voice/stt.py` — Groq Whisper, routed and metered.
+- `voice/tts.py` — Piper ONNX with streaming playback; system and null backends.
+- `voice/pipeline.py`, `voice/bench.py` — composition and measurement.
+- CLI: `victor listen`, `say`, `voice devices`, `voice install`, `bench voice`.
 
-**Exit gate** — speak a sentence, see the transcript, hear a spoken reply.
-Publish measured p50/p95 for mic-close → first audio.
+**Exit gate** — real microphone capture (2.00 s at 16 kHz, verified), real
+Piper synthesis played through real speakers, and measured p50/p95 published
+below rather than asserted. ✅
+
+### Three decisions that changed the design
+
+**WebRTC VAD was dropped as a dependency.** `webrtcvad` 2.0.10 imports
+`pkg_resources`, which setuptools 81+ removed, so it fails at import on a
+current install. Putting that on the critical path of a voice agent is not
+worth it. Victor ships an adaptive energy detector instead — a running noise
+floor that only adapts on non-speech frames, so a long utterance cannot drag
+the threshold up over itself. WebRTC remains available as an opt-in backend.
+
+**The noise floor is clamped.** If the mic opens while the user is already
+talking — routine in push-to-talk — calibration measures speech, the floor
+lands at speech level, and the VAD goes permanently deaf. Capping the floor at
+-35 dBFS trades a slightly trigger-happy threshold for never failing to hear.
+
+**The end-of-turn silence is trimmed before upload.** Ending a turn takes
+700 ms of silence, and Whisper bills by audio duration. Uploading the pause
+that proved the user stopped talking would spend ~15% of the audio budget on
+nothing. Only a 200 ms tail is kept, enough to avoid clipping a final
+consonant.
+
+### Measured on this machine
+
+MacBook Air (Apple Silicon), Python 3.13.14, `victor bench voice --runs 7`:
+
+```
+stage                                  runs        p50        p95  unit
+vad endpointing                           7        0.1        0.1  ms/s audio
+tts model load (once)                     1      525.6      525.6  ms
+tts time-to-first-audio (1 sentence)      7       75.5      132.9  ms
+tts synthesis (1 sentence)                7       75.5      132.9  ms
+tts time-to-first-audio (3 sentences)     7       42.1       46.8  ms
+tts synthesis (3 sentences)               7      108.5      112.8  ms
+tts realtime factor (3 sentences)         7      0.036      0.037  x
+```
+
+**Piper chunks per sentence.** For a one-sentence reply, time-to-first-audio
+*is* the full synthesis time and streaming buys nothing; across three
+sentences it drops from 108 ms to 42 ms. The benchmark reports both rather
+than averaging the distinction away. The practical consequence for P2: replies
+should be written as several short sentences, not one long one.
+
+**Not yet measured:** STT round trip and the full voice→voice loop, both of
+which need a live `GROQ_API_KEY`. `victor bench voice --stt` measures them and
+spends real audio quota doing it. Windows numbers are also outstanding — the
+figures above are macOS.
 
 ---
 

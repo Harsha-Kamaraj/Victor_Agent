@@ -29,12 +29,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# P1 - voice I/O
+# P1 - voice I/O.
+# webrtcvad is deliberately absent: it imports pkg_resources and so fails on
+# setuptools 81+. Victor ships its own energy VAD instead; install webrtcvad
+# yourself to opt into the WebRtcVad backend.
 voice = [
     "sounddevice>=0.5",
     "numpy>=2.1",
-    "webrtcvad>=2.0.10",
-    "piper-tts>=1.2",
+    "piper-tts>=1.3",
 ]
 # P4/P5 - screen perception and desktop actuation (Windows only)
 desktop = [
