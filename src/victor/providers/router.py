@@ -18,7 +18,7 @@ from ..config import Settings
 from ..errors import NoProviderAvailable
 from ..quota import QuotaLedger, QuotaStatus
 from .base import ModelSpec, Selection, Workload
-from .registry import ROUTING_TABLE, spec_by_id
+from .registry import routing_table_for, spec_by_id
 
 #: Settings field holding a user override, per workload.
 _OVERRIDE_FIELD: dict[Workload, str] = {
@@ -41,7 +41,9 @@ class Router:
     ) -> None:
         self._settings = settings
         self._ledger = ledger
-        self._table = table if table is not None else ROUTING_TABLE
+        # Limits are config, not constants: providers change them without
+        # notice, so limits.json wins over the built-in table where it exists.
+        self._table = table if table is not None else routing_table_for(settings)
         self._on_select = on_select
 
     # -- chain construction ------------------------------------------------

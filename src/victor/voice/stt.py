@@ -52,11 +52,15 @@ class Transcriber:
         client: httpx.Client | None = None,
         trace: Trace | None = None,
         timeout: float = 30.0,
+        attempts: int = 3,
+        backoff: float = 0.5,
     ) -> None:
         self._settings = settings
         self._router = router
         self._client = client or httpx.Client(timeout=timeout)
         self._trace = trace or Trace.disabled()
+        self._attempts = max(1, attempts)
+        self._backoff = backoff
 
     def transcribe(
         self,
@@ -116,15 +120,7 @@ class Transcriber:
         if prompt:
             data["prompt"] = prompt
 
-        try:
-            response = self._client.post(
-                endpoint,
-                headers={"Authorization": f"Bearer {key}"},
-                files={"file": ("utterance.wav", wav, "audio/wav")},
-                data=data,
-            )
-        except httpx.HTTPError as exc:
-            raise ProviderError(f"{selection.key}: {type(exc).__name__}: {exc}") from exc
+        response = self._post_with_retry(endpoint, selection, wav, data, key)
 
         if response.status_code == 429:
             retry = response.headers.get("retry-after")
@@ -145,6 +141,57 @@ class Transcriber:
             return str(response.json().get("text", ""))
         except ValueError as exc:
             raise ProviderError(f"{selection.key}: response was not JSON") from exc
+
+    def _post_with_retry(
+        self,
+        endpoint: str,
+        selection: Selection,
+        wav: bytes,
+        data: dict[str, str],
+        key: str | None,
+    ) -> httpx.Response:
+        """Upload, retrying only what is worth retrying.
+
+        Speech is the one stage the user is actively waiting through, so a
+        dropped connection must not lose an utterance they already spoke - they
+        would have to say it again, and the audio seconds are spent either way.
+
+        Only transient faults are retried: connection errors and 5xx. A 429 is
+        not retried here (the ledger and router handle quota, and hammering a
+        rate limit makes it worse), and a 401 never becomes valid by asking
+        twice.
+        """
+        last: Exception | None = None
+
+        for attempt in range(self._attempts):
+            if attempt:
+                # 0.5s, 1s, 2s - short, because someone is waiting to be heard.
+                delay = self._backoff * (2 ** (attempt - 1))
+                self._trace.event(
+                    "stt.retry", attempt=attempt, delay_s=round(delay, 2), model=selection.key
+                )
+                time.sleep(delay)
+
+            try:
+                response = self._client.post(
+                    endpoint,
+                    headers={"Authorization": f"Bearer {key}"},
+                    files={"file": ("utterance.wav", wav, "audio/wav")},
+                    data=data,
+                )
+            except httpx.HTTPError as exc:
+                last = exc
+                continue
+
+            if response.status_code >= 500:
+                last = ProviderError(f"HTTP {response.status_code}")
+                continue
+            return response
+
+        raise ProviderError(
+            f"{selection.key}: giving up after {self._attempts} attempts: "
+            f"{type(last).__name__}: {last}"
+        ) from last
 
     def close(self) -> None:
         self._client.close()

@@ -12,6 +12,11 @@ keys work; it cannot check the numbers, so treat them as a floor.
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
+
 from ..quota import UNMETERED, QuotaLimits
 from .base import ModelSpec, Workload
 
@@ -172,3 +177,67 @@ def spec_by_id(key: str) -> ModelSpec | None:
 def limits_by_key() -> dict[str, QuotaLimits]:
     """``{quota key: limits}`` for every model - what the ledger displays."""
     return {spec.key: spec.limits for spec in all_specs()}
+
+
+# --- overrides ------------------------------------------------------------
+#
+# The plan is explicit: "Every free-tier limit is config, never hardcoded -
+# these numbers change without notice." The table above is a default, not a
+# fact. A user whose account has different limits, or who is reading this after
+# a provider changed them, edits limits.json rather than the source.
+
+_FIELDS = {
+    "requests_per_minute",
+    "requests_per_day",
+    "tokens_per_minute",
+    "tokens_per_day",
+    "audio_seconds_per_day",
+    "reset_timezone",
+}
+
+
+def load_overrides(path: Path) -> dict[str, dict[str, Any]]:
+    """Read per-model limit overrides. A missing or broken file means none.
+
+    Never raises: a malformed limits.json must not stop the agent starting.
+    The conservative built-in table is a safe thing to fall back to.
+    """
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(key): {k: v for k, v in value.items() if k in _FIELDS}
+        for key, value in raw.items()
+        if isinstance(value, dict)
+    }
+
+
+def apply_overrides(
+    table: dict[Workload, tuple[ModelSpec, ...]], overrides: dict[str, dict[str, Any]]
+) -> dict[Workload, tuple[ModelSpec, ...]]:
+    """Return a routing table with the named models' limits replaced."""
+    if not overrides:
+        return table
+
+    patched: dict[str, ModelSpec] = {}
+    for spec in all_specs():
+        change = overrides.get(spec.key) or overrides.get(spec.model)
+        if change:
+            patched[spec.key] = replace(spec, limits=replace(spec.limits, **change))
+
+    if not patched:
+        return table
+    return {
+        workload: tuple(patched.get(spec.key, spec) for spec in specs)
+        for workload, specs in table.items()
+    }
+
+
+def routing_table_for(settings: Any) -> dict[Workload, tuple[ModelSpec, ...]]:
+    """The routing table this session should use, overrides applied."""
+    return apply_overrides(ROUTING_TABLE, load_overrides(settings.paths.limits_file))

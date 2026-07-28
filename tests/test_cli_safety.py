@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 from victor.cli import app
 from victor.config import Settings
 from victor.doctor import Status, run_checks
+from victor.providers import Workload
 from victor.safety import ActionJournal, Risk
 
 runner = CliRunner()
@@ -305,3 +306,99 @@ def test_tools_no_longer_claims_the_gate_is_missing(workspace: Path) -> None:
     assert result.exit_code == 0
     assert "not built yet" not in result.output
     assert "classified before they run" in result.output
+
+
+# --- the CLI surface the plan names ---------------------------------------
+
+
+def test_undo_last_n_reverses_several(workspace: Path) -> None:
+    settings = Settings()
+    journal = ActionJournal(settings.paths.ensure().journal_file)
+    for name in ("one", "two"):
+        (workspace / name).mkdir()
+        journal.record(
+            "shell", {"command": f"mkdir {name}"}, risk=Risk.CONFIRM, decision="allow"
+        )
+
+    result = runner.invoke(app, ["undo", "--last", "2"])
+    assert result.exit_code == 0, result.output
+    assert not (workspace / "one").exists()
+    assert not (workspace / "two").exists()
+
+
+def test_undo_explains_when_nothing_is_reversible(workspace: Path) -> None:
+    result = runner.invoke(app, ["undo"])
+    assert result.exit_code == 1
+    assert "nothing recent" in result.output
+
+
+def test_sessions_and_replay_are_aliases(workspace: Path) -> None:
+    from victor.tracing import Trace
+
+    settings = Settings()
+    with Trace.open(settings.paths.ensure().traces_dir, label="t") as trace:
+        trace.event("hello", text="world")
+
+    listed = runner.invoke(app, ["sessions"])
+    assert listed.exit_code == 0
+    assert "ok" in listed.output
+
+    shown = runner.invoke(app, ["replay", "last"])
+    assert shown.exit_code == 0
+    assert "hello" in shown.output
+
+
+def test_install_shim_writes_a_launcher(workspace: Path) -> None:
+    target = workspace / "bin"
+    result = runner.invoke(app, ["install-shim", "--dir", str(target)])
+
+    assert result.exit_code == 0, result.output
+    shim = next(target.iterdir())
+    assert "-m victor" in shim.read_text()
+
+
+def test_run_with_text_executes_one_task(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    patch_transport(monkeypatch, scripted({"content": "On branch main."}))
+
+    result = runner.invoke(app, ["run", "--text", "what branch am I on"])
+    assert result.exit_code == 0, result.output
+    assert "On branch main." in result.output
+
+
+def test_bench_takes_a_voice_flag(workspace: Path) -> None:
+    result = runner.invoke(app, ["bench", "--voice", "--runs", "1"])
+    assert result.exit_code == 0, result.output
+    assert "vad endpointing" in result.output
+
+
+def test_limits_are_config_not_constants(workspace: Path) -> None:
+    """The plan: every free-tier limit is config, never hardcoded."""
+    import json
+
+    from victor.providers import Router
+    from victor.providers.registry import GEMINI_25_FLASH
+    from victor.quota import QuotaLedger
+
+    settings = Settings()
+    settings.paths.ensure().limits_file.write_text(
+        json.dumps({GEMINI_25_FLASH.key: {"requests_per_day": 9999}}), encoding="utf-8"
+    )
+
+    router = Router(settings, QuotaLedger(settings.paths.quota_file))
+    spec = router.chain(Workload.VISION)[0]
+    assert spec.limits.requests_per_day == 9999
+
+
+def test_a_broken_limits_file_does_not_stop_startup(workspace: Path) -> None:
+    from victor.providers import Router
+    from victor.providers.registry import GEMINI_25_FLASH
+    from victor.quota import QuotaLedger
+
+    settings = Settings()
+    settings.paths.ensure().limits_file.write_text("{ not json", encoding="utf-8")
+
+    router = Router(settings, QuotaLedger(settings.paths.quota_file))
+    spec = router.chain(Workload.VISION)[0]
+    assert spec.limits.requests_per_day == GEMINI_25_FLASH.limits.requests_per_day

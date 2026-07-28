@@ -24,6 +24,21 @@ class Paths:
         return self.root / "quota.json"
 
     @property
+    def limits_file(self) -> Path:
+        """Per-model free-tier overrides.
+
+        The plan requires every limit to be config rather than hardcoded,
+        because providers change them without notice. The built-in table is a
+        conservative default; this file wins where it disagrees.
+        """
+        return self.root / "limits.json"
+
+    @property
+    def trash_dir(self) -> Path:
+        """Where deleted files wait, so `victor undo` can put them back."""
+        return self.root / "trash"
+
+    @property
     def traces_dir(self) -> Path:
         """One JSONL file per session, appended as the agent runs."""
         return self.root / "traces"

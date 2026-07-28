@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import platform
 import sys
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -31,8 +33,6 @@ trace_app = typer.Typer(help="Inspect session traces.", no_args_is_help=True)
 app.add_typer(trace_app, name="trace")
 voice_app = typer.Typer(help="Voice devices and models.", no_args_is_help=True)
 app.add_typer(voice_app, name="voice")
-bench_app = typer.Typer(help="Measured latency benchmarks.", no_args_is_help=True)
-app.add_typer(bench_app, name="bench")
 journal_app = typer.Typer(help="Review and reverse past actions.", no_args_is_help=True)
 app.add_typer(journal_app, name="journal")
 
@@ -652,6 +652,141 @@ def journal_undo(
 
 
 @app.command()
+def run(
+    text: Annotated[
+        str | None,
+        typer.Option("--text", help="Drive by typed prompt instead of the microphone."),
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Full loop, nothing executes.")
+    ] = False,
+    steps: Annotated[int, typer.Option("--steps")] = 8,
+    mode: Annotated[str, typer.Option("--mode", help="vad | ptt")] = "vad",
+    yes: Annotated[bool, typer.Option("--yes", help="Approve every action.")] = False,
+) -> None:
+    """Start the agent.
+
+    With ``--text`` it runs one typed task and exits; without, it opens the
+    push-to-talk voice loop. The typed form is the one used constantly during
+    development, so voice is never on the critical path.
+    """
+    if text is not None:
+        do_task(
+            task=text,
+            steps=steps,
+            speak_reply=False,
+            show_steps=True,
+            dry_run=dry_run,
+            yes=yes,
+        )
+        return
+
+    if dry_run:
+        console.print("[yellow]dry run:[/yellow] actions will be previewed, not executed")
+    converse(turns=0, mode=mode, steps=steps)
+
+
+@app.command()
+def undo(
+    last: Annotated[
+        int, typer.Option("--last", "-n", help="How many recent actions to reverse.")
+    ] = 1,
+) -> None:
+    """Reverse recent actions. Alias for `victor journal undo`."""
+    from .safety import ActionJournal, AutoConfirmer, SafetyInterceptor
+    from .safety import undo_last as reverse_last
+    from .tools import build_registry
+
+    settings = _settings()
+    journal = ActionJournal(settings.paths.ensure().journal_file)
+    interceptor = SafetyInterceptor(confirmer=AutoConfirmer(True))
+    registry = build_registry(settings, interceptor=interceptor)
+
+    results = reverse_last(journal, registry, last)
+    if not results:
+        console.print("[yellow]nothing recent can be undone[/yellow]")
+        console.print(
+            "[dim]Deletes go to the trash and can be restored; network calls "
+            "cannot. `victor journal list` says which is which.[/dim]"
+        )
+        raise typer.Exit(1)
+
+    failed = False
+    for result in results:
+        if result.error:
+            err_console.print(f"[red]undo failed:[/red] {result.error}")
+            failed = True
+        else:
+            console.print(f"[green]undone[/green] {result.entry.id}: {result.steps[0]}")
+    if failed:
+        raise typer.Exit(1)
+
+
+@app.command()
+def sessions(
+    limit: Annotated[int, typer.Option("--limit", "-n")] = 20,
+) -> None:
+    """List recorded sessions. Alias for `victor trace list`."""
+    trace_list(limit=limit)
+
+
+@app.command()
+def replay(
+    session: Annotated[str, typer.Argument(help="Session id, or 'last'.")] = "last",
+) -> None:
+    """Step through a recorded session. Alias for `victor trace show`."""
+    trace_show(session=session)
+
+
+@app.command(name="install-shim")
+def install_shim(
+    directory: Annotated[
+        str | None,
+        typer.Option("--dir", help="Where to write the shim. Defaults to a PATH entry."),
+    ] = None,
+) -> None:
+    """Put `victor` on the global PATH without activating the venv."""
+    import os
+    import stat
+    import sysconfig
+
+    interpreter = Path(sys.executable)
+    is_windows = platform.system() == "Windows"
+
+    if directory:
+        target_dir = Path(directory)
+    elif is_windows:
+        # The plan's target: the base Python's Scripts dir, already on PATH.
+        target_dir = Path(sysconfig.get_path("scripts", "nt_user"))
+    else:
+        target_dir = Path.home() / ".local" / "bin"
+
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        err_console.print(f"[red]cannot create {target_dir}:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+    if is_windows:
+        shim = target_dir / "victor.cmd"
+        shim.write_text(f'@echo off\r\n"{interpreter}" -m victor %*\r\n', encoding="utf-8")
+    else:
+        shim = target_dir / "victor"
+        shim.write_text(f'#!/bin/sh\nexec "{interpreter}" -m victor "$@"\n', encoding="utf-8")
+        shim.chmod(shim.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    console.print(f"[green]installed[/green] {shim}")
+    console.print(f"[dim]runs {interpreter} -m victor[/dim]")
+
+    on_path = str(target_dir) in os.environ.get("PATH", "").split(os.pathsep)
+    if not on_path:
+        console.print(
+            f"[yellow]note:[/yellow] {target_dir} is not on your PATH. "
+            "Add it, or pass --dir pointing somewhere that is."
+        )
+
+
+@app.command()
 def check(
     command: Annotated[str, typer.Argument(help="A shell command to classify.")],
 ) -> None:
@@ -703,8 +838,11 @@ def tools() -> None:
 # --- benchmarks -----------------------------------------------------------
 
 
-@bench_app.command("voice")
-def bench_voice(
+@app.command()
+def bench(
+    voice: Annotated[
+        bool, typer.Option("--voice", help="Measure the voice legs (the default).")
+    ] = True,
     runs: Annotated[int, typer.Option("--runs", "-n")] = 5,
     stt: Annotated[
         bool, typer.Option("--stt", help="Also measure STT (spends audio quota).")
@@ -713,7 +851,9 @@ def bench_voice(
         bool, typer.Option("--playback", help="Play audio while timing.")
     ] = False,
 ) -> None:
-    """Measure VAD, TTS and optionally STT latency on this machine."""
+    """Measure latency on this machine. Numbers come from real runs."""
+    if not voice:
+        console.print("[dim]only the voice legs are measurable so far; --voice is implied.[/dim]")
     from .voice.bench import bench_pipeline, summarise
     from .voice.tts import PiperSynthesizer
 
