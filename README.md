@@ -303,4 +303,6 @@ Architecture and implementation plan by [@Gagan-1718](https://github.com/Gagan-1
 
 ## License
 
-MIT
+[MIT](LICENSE) — Copyright (c) 2026 Harsha Kamaraj and Gagandeep.
+
+Use it, fork it, ship it. The dependencies keep their own licences; `pip install -e ".[voice,desktop,memory]"` pulls Piper, fastembed, FAISS and pyobjc, all under permissive terms of their own.
