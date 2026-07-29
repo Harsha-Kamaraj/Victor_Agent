@@ -708,20 +708,146 @@ because "Victor remembers" means two different things.
 
 ---
 
-## P7 · Scout
+## P7 · Scout ✅
 
-**Build** — GitHub portfolio gap analysis reusing P6's embedding stack.
+**Build** — `scout/github.py`, `scout/corpus.py`, `scout/analyze.py`,
+`victor scout`. Three files, because P6's embedder and similarity maths are
+reused wholesale — which is what the plan asked for, this being the designated
+cut-line.
 
-**Exit gate** — point it at a profile, get back specific, non-generic gaps.
+**Exit gate** — passed against two real accounts. Ranked, spoken, every row
+citing the repositories that produced it:
+
+```
+topic          distance                              seen in  evidence
+claude         further from your work than 75%          5      affaan-m/ECC (234946★),
+                                                               NousResearch/hermes-agent
+                                                               your nearest: Harsha-Kamaraj/Portfolio
+design-system  further from your work than 88%          2      donnemartin/system-design-primer,
+                                                               mui/material-ui
+                                                               your nearest: Cache-Me-If-You-Can
+
+covered  style-guide (0.71 via Gagan-1718/portfolio)
+```
+
+### An empty corpus, and a filter that was too clever
+
+The first run produced nothing at all: *"your repositories carry no topics or
+languages to search on"*, against an account with ten public repositories.
+
+`GENERIC_TOPICS` exists so a corpus is not seeded on `topic:python` — which
+returns everything, and every portfolio has a gap against everything. But the
+language fallback ran through the same filter, so `Python` and `C` were
+discarded too and nothing was left.
+
+Topics and languages are not interchangeable, which is the thing the first
+version missed. `topic:python` is a corpus of everything; `language:Python` is
+"active, well-starred Python work", which is a narrower and perfectly reasonable
+comparison set. They are now separate qualifiers, and a portfolio with no topics
+at all still gets a corpus.
+
+### Absolute thresholds decide nothing here
+
+With a corpus in hand, the second run said every topic was already covered.
+
+Measuring the actual distribution explained why. Across 48 corpus repositories,
+the nearest-user similarity ran from **0.53 to 0.73, median 0.63**. A sentence
+embedder puts nearly all software writing in that band, so the 0.55 floor
+marked everything covered — and 0.65 would have marked half of it a gap,
+arbitrarily.
+
+Rows are now ranked within *this run's own* distribution. That is robust to the
+compression and it is the more honest claim: "further from your work than 80% of
+the comparison set" is checkable, while "coverage 0.58" reads as a measurement
+and is not one. The report says so under the table.
+
+### Saying what the corpus is not
+
+GitHub has no public trending API — the trending page comes from an internal
+service, and scraping it would make Scout depend on somebody's HTML. So the
+corpus is a Search API heuristic, and that is stated **in the output**, not only
+in a docstring: the person reading a ranked list is the one who needs to know
+how it was made.
+
+Two biases are named for the same reason. Stars measure attention, not quality —
+`google/styleguide` and `docker/awesome-compose` came out as the closest
+matches to a portfolio README, which says more about documentation repositories
+than about the portfolio. And seeding from the user's own topics finds gaps
+*adjacent* to what they already do, which is the useful question but a narrower
+one than it appears.
 
 ---
 
-## P8 · Surface & Ship
+## P8 · Surface & Ship ✅
 
-**Build** — HUD, the real benchmark table, test pass, demo recording.
+**Build** — `ui/hud.py`, `bench.py`, `victor hud`, `victor bench --traces`, the
+README rewrite, and 57 more tests.
 
-**Exit gate** — README's latency numbers are measured on this machine and match
-what the demo visibly does.
+**Exit gate** — passed. A clone with only the required key reaches:
+
+```
+ready: 25 ok, 5 warn, 0 fail, 0 not yet built     (exit 0)
+```
+
+The five warnings are two unset optional keys, an unset GitHub token, a voice
+model not yet downloaded, and a screen that was locked at the time — every one
+naming what it is and how to change it.
+
+### The HUD reads state off disk
+
+The obvious design is for the agent to push updates into the strip, and it is
+wrong twice over. Tk insists on owning the main thread on macOS, so an agent
+that also wants it acquires a threading problem that has nothing to do with the
+feature. And a HUD wired into the agent can only watch runs it was started with.
+
+Both problems disappear if the strip is a monitor. The quota ledger and the
+session traces are already files the agent maintains, so it polls them — start
+it before or after a task, in another terminal, same result. The coupling is a
+directory.
+
+tkinter, because it ships with Python. The plan said *status strip, not a UI
+framework* and specifically did not want PyQt.
+
+### "Today" needed the routing table
+
+Summing the ledger's buckets showed the wrong number. The ledger keys buckets by
+each provider's reset timezone — Groq at UTC midnight, Google at midnight
+Pacific — so for several hours a day those two disagree, and comparing against a
+single date would make half the ledger look like yesterday. The strip would read
+zero during a run that was spending, which is precisely the number it exists to
+be trusted about.
+
+`_today_keys()` derives the valid dates from the routing table, so a new
+provider in a new timezone is counted without anyone remembering to. It
+currently returns two dates, which is the bug reproducing itself on demand.
+
+### A locked screen is not a broken install
+
+`victor doctor` exited non-zero because a screen saver had kicked in. That is a
+false alarm, and false alarms are how a preflight check teaches people to ignore
+it. Transient session states are WARN now; FAIL is reserved for things that are
+actually broken.
+
+The same pass retired the PENDING convention, which existed so a green tick
+could never stand for a pipeline that did not exist. Every phase has one now, so
+an empty PENDING set is the correct state — and there is a test asserting no
+check still claims "not implemented".
+
+### The benchmark table is regenerated, not typed
+
+`victor bench --traces` folds recorded sessions into p50/p95 per stage. A number
+in the README that nobody can reproduce is a claim; one that falls out of a
+command is a measurement. Rows carry their sample count, and any row with n < 20
+says outright that its "p95" is the worst single sample rather than a
+percentile — a p95 over three observations is not a p95, and a table that does
+not admit it invites its reader to believe it.
+
+### Still outstanding
+
+- **No demo video.** The plan asks for 90 seconds across four scenarios. That
+  needs a person at the machine.
+- **Still no live API key**, which remains the largest gap in the whole project
+  and is now the first line of the README's "What this can't do".
 
 ---
 

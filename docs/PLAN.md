@@ -4,7 +4,7 @@
 > before implementation began. It is kept as authored, with phase headings ticked
 > as their exit gates pass and short *as-built* notes where reality diverged.
 >
-> **Build status: P0–P6 complete, P7–P8 outstanding.**
+> **Build status: all eight phases complete.**
 > What was actually built, why it differs, and the measured numbers live in
 > [BUILD-LOG.md](BUILD-LOG.md) — that file is the record of execution, this one
 > is the record of intent. Read this first.
@@ -103,6 +103,8 @@ ran, and each changed a decision above:
 | One Quartz event can carry a whole string | Text fields accept it; anything handling `keyDown:` itself takes the first character and drops the rest — Calculator typed `8*8` and showed `8` | One event per character. A silently truncated string is a worse failure than a slow one |
 | A synthesised keystroke is independent of the last one | A new `CGEvent` inherits the window server's modifier flags, so after one `cmd+a` every keystroke arrives as `cmd+<key>` — "Victor" became six menu shortcuts, silently, while every layer reported success | Flags cleared on every typed event, chord key-ups carry none, and `release_modifiers` posts real modifier key-ups instead of being a no-op |
 | A window with no listed controls has none | macOS stops reporting window geometry while the screen is locked, so every rect is empty and every element is filtered out | `session.py` detects a locked screen and a secure desktop on both platforms; snapshots carry a `note` distinguishing "nothing to click" from "nothing measurable" |
+| Rank a portfolio by cosine distance to a comparison corpus | Measured across 48 real repositories, every similarity fell between 0.53 and 0.73 — a sentence embedder puts all software writing in one narrow band, so any absolute threshold decides arbitrarily | Rank within the run's own distribution. "Further from your work than 80% of the set" survives inspection; "coverage 0.58" reads as a measurement and is not one |
+| Seed the comparison corpus from the user's topics | A real account had ten repositories and no topics at all, and languages were filtered out by the same generic-topic list — so the corpus was empty and the report said nothing was wrong | Topics and languages are different qualifiers. `language:Python` is a narrower, legitimate corpus; `topic:python` is everything |
 | Auto-capture: a command fails, a later one succeeds, store the pair | `pytest` fails, `ls` succeeds while you look around, and "the fix is ls" is stored and later recalled with confidence | The *same* command failing and then succeeding. Verifiable rather than inferred, and nothing is stored while the command is still broken |
 | A read-only command can be recognised by its name | `printf 'x' > helper.py` starts with `printf` and writes a file — the first exit-gate run stored nothing because of it | `is_diagnostic` delegates to P3's `classify_shell`. One definition of "this only reads", shared with the safety layer |
 | The climb to a window can stop at the first Pane | Explorer nests six panes internally, so perception stopped at 'Items View' and returned 147 of 248 elements — missing Back, Forward, the address bar and every toolbar verb | Climb to the first `WindowControl`, fall back to the foreground window. Found by the Windows smoke test, not by any macOS run |
@@ -410,7 +412,7 @@ Keys go in `.env` (git-ignored).
 
 ---
 
-## P7 — Scout · **S**
+## P7 — Scout · **S**  ✅ **shipped**
 
 **Goal:** GitHub portfolio gap analysis. A secondary feature, deliberately — not a second product.
 
@@ -428,7 +430,7 @@ Keys go in `.env` (git-ignored).
 
 ---
 
-## P8 — Surface & Ship · **M**
+## P8 — Surface & Ship · **M**  ✅ **shipped**
 
 **Goal:** it looks finished, and every claim is backed by a number.
 

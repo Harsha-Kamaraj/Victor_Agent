@@ -45,17 +45,31 @@ def test_doctor_fails_without_the_required_key(tmp_path: Path) -> None:
     assert any("GROQ_API_KEY" in c.name for c in failed)
 
 
-def test_doctor_reports_unbuilt_phases_as_pending(settings: Settings) -> None:
-    checks = run_checks(settings, network=False)
-    pending = {c.name for c in checks if c.status is Status.PENDING}
+def test_nothing_is_reported_as_unbuilt_now_that_every_phase_shipped(
+    settings: Settings,
+) -> None:
+    """The PENDING convention retires when the last phase lands.
 
-    # Honesty check: nothing from a later phase may report OK yet. P6 shipped,
-    # so "memory index" moved out of this set and P7/P8 are what remain.
-    assert "scout" in pending
-    assert "status HUD" in pending
-    assert not any(
-        c.status is Status.OK and "not implemented" in c.detail for c in checks
-    )
+    It existed so a green tick could never stand for a pipeline that did not
+    exist. Every phase now has one, so an empty PENDING set is the correct
+    state - and a check that still claimed "not implemented" would be the lie
+    the convention was guarding against.
+    """
+    checks = run_checks(settings, network=False)
+
+    assert {c.name for c in checks if c.status is Status.PENDING} == set()
+    assert not any("not implemented" in c.detail for c in checks)
+
+
+def test_a_transient_machine_state_does_not_block_the_exit_code(
+    settings: Settings,
+) -> None:
+    """A locked screen made `victor doctor` exit non-zero. False alarms are how
+    a preflight check teaches people to ignore it."""
+    checks = run_checks(settings, network=False)
+    blocking = [c for c in checks if c.blocking]
+
+    assert not any("locked" in c.detail for c in blocking)
 
 
 def test_doctor_checks_memory_for_real_now_that_p6_exists(settings: Settings) -> None:

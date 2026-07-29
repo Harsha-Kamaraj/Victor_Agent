@@ -2,7 +2,7 @@
 
 A voice-driven computer-use agent for **Windows and macOS** that runs entirely on free API tiers — because it reads the accessibility tree instead of guessing pixels.
 
-**Status: P0–P6 complete.** Plumbing, voice I/O, the agent core, the safety layer, screen perception, desktop actuation and local memory are built and tested. Everything below the P6 line is not implemented yet, and `victor doctor` says so out loud rather than reporting a green tick for a pipeline that does not exist.
+**Status: all eight phases complete.** 692 tests, and `victor doctor` reports what is genuinely unavailable on your machine rather than a green tick for something that does not work.
 
 Two documents, deliberately separate: [docs/PLAN.md](docs/PLAN.md) is the plan of record — what was intended, why, and what was deliberately cut. [docs/BUILD-LOG.md](docs/BUILD-LOG.md) is what actually happened, including the decisions that changed during implementation and the measured numbers.
 
@@ -58,6 +58,33 @@ selected groq:meta-llama/llama-4-scout-17b-16e-instruct
 
 Spending is tracked in a persistent ledger that understands each provider's metering — including that Groq's day rolls at UTC midnight and Google's at midnight Pacific — so the free-tier promise survives a reboot.
 
+## How it fits together
+
+```
+   microphone ──▶ VAD ──▶ Groq Whisper ──▶ ┌─────────────┐
+                          (STT)            │   ReAct     │
+                                           │   loop      │──▶ Groq gpt-oss-120b
+   ┌──────────────────────────────────────▶│             │    (text reasoning)
+   │                                       └──────┬──────┘
+   │   accessibility tree                         │ picks a tool
+   │   UIA (Windows) / AX (macOS)                 ▼
+   │   ~20 ms, local, free            ┌───────────────────────┐
+   │        ▲                         │  safety interceptor   │  DENY  ─▶ refused
+   │        │  no usable tree?        │  classify → confirm   │  CONFIRM ─▶ ask
+   │        └── Gemini Flash          │  → journal            │  SAFE  ─▶ run
+   │            (vision, last resort) └───────────┬───────────┘
+   │                                              ▼
+   │                          shell · git · click · type · press · read
+   │                                              │
+   └───────────── local memory ◀──────────────────┘  error → fix pairs
+                  fastembed + FAISS + SQLite         captured automatically
+                  offline, no quota
+                                                  ▼
+                                    Piper TTS ──▶ speaker  (local, offline)
+```
+
+Everything on the left of that diagram is free and local. The only boxes that spend a request are the three model calls, and the design spends the scarcest one — vision — last.
+
 ## Roadmap
 
 Phases are units of execution and integration, not a calendar. Each has an exit gate it must pass before the next one starts — a box gets ticked only when that gate is green.
@@ -69,8 +96,8 @@ Phases are units of execution and integration, not a calendar. Each has an exit 
 - [x] **P4 · Screen Perception** — UIA tree reader, screen capture, vision fallback (parallelizable)
 - [x] **P5 · Desktop Actuation** — clicks and typing driven by accessibility handles, gated by P3, using P4
 - [x] **P6 · Memory** — FAISS + fastembed, auto-captured error/fix pairs, recall injection
-- [ ] **P7 · Scout** — GitHub portfolio gap analysis, reusing P6's embedding stack
-- [ ] **P8 · Surface & Ship** — HUD, benchmarks, tests, demo
+- [x] **P7 · Scout** — GitHub portfolio gap analysis, reusing P6's embedding stack
+- [x] **P8 · Surface & Ship** — status strip, trace-derived benchmarks, tests
 
 Dependencies: P0 → P1 → P2 → P3 → P5 → P6 → P7 → P8, with P4 branching off P0 and merging into P5. P4 is read-only, so it's the one phase that can be built out of order.
 
@@ -91,11 +118,13 @@ Piper emits one chunk per sentence, so a one-sentence reply gets no benefit from
 
 STT round trip and the full voice→voice loop are **not measured yet** — they need a live `GROQ_API_KEY`. `victor bench voice --stt` measures them, and spends real audio quota to do it.
 
-## Honest limitations
+## What this can't do
 
-Stated upfront rather than discovered later:
+Stated upfront rather than discovered later. This section is longer than most projects' and that is deliberate — it is the part a reader can check.
 
-- **Not sub-500ms.** Voice → shell is ~600–900 ms. Voice → vision → act → speak is 2–6 s. Those two remain estimates until P2 exists to measure them end to end; the voice-stack numbers above are real.
+**Never run with a live API key.** The single largest gap. There is no `GROQ_API_KEY` on the development machine, so no run has gone voice → model → tool → speech end to end. Every provider path is tested against `httpx.MockTransport`, which proves the request shapes and the error handling and proves nothing about the models' behaviour. The ReAct loop, the tool schemas and the prompts are unexercised by a real model.
+
+- **Not sub-500ms.** Voice → shell is ~600–900 ms. Voice → vision → act → speak is 2–6 s. Those two remain estimates for the reason above; the voice-stack numbers below are real.
 - **Push-to-talk is terminal-scoped.** `victor listen --mode ptt` starts and stops on Enter. A system-wide hotkey needs an OS-level hook and lands with the HUD in P8.
 - **Not always-on.** The free vision tier is ~250 requests/day, so screen capture happens on demand, never as a continuous stream.
 - **Targeted app support.** UIA is tuned for File Explorer, Edge/Chrome, Windows Settings, and VS Code. Other apps may work but aren't guaranteed.
@@ -107,21 +136,45 @@ Stated upfront rather than discovered later:
 - **Memory is semantic only with the extra installed.** `pip install -e '.[memory]'` pulls a ~130 MB ONNX model that matches paraphrases. Without it, recall falls back to a hashed bag of words that finds a traceback it has seen almost verbatim and nothing more. `victor doctor` reports which one is live, because "Victor remembers" means two different things.
 - **Memory watches the shell only.** A failing `git` or desktop action does not consult it yet.
 - **Free-tier numbers are declared, not discovered.** Providers change allowances without notice. The routing table in [src/victor/providers/registry.py](src/victor/providers/registry.py) states them conservatively, so Victor under-uses a generous tier rather than hitting a 429 mid-demo.
+- **Scout is a heuristic and says so on every run.** GitHub has no trending API, stars measure attention rather than quality, and the comparison set is seeded from your own topics — so it finds gaps adjacent to what you already do, not a view of the industry. Corpus results skew toward tutorials and awesome-lists, which outstar production code.
+- **The status strip polls; it does not stream.** It reads the ledger and the newest trace four times a second. A task that starts and finishes between two polls will not appear.
+- **No demo video.** The plan asks for a 90-second recording of four scenarios. That needs a person at the machine, and this section would rather admit the gap than describe a video nobody has made.
 
 ## Setup
 
 Requires Python 3.13+ (developed on 3.13 and 3.14).
+
+**Windows**
 
 ```powershell
 git clone https://github.com/Harsha-Kamaraj/Victor_Agent.git
 cd Victor_Agent
 py -3.13 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -e .
+pip install -e ".[voice,desktop,memory]"
 
-copy .env.example .env    # then add your three free API keys
+copy .env.example .env    # then add GROQ_API_KEY, free, no card
 victor doctor             # verifies keys, storage, deps, quota
 ```
+
+**macOS**
+
+```console
+git clone https://github.com/Harsha-Kamaraj/Victor_Agent.git
+cd Victor_Agent
+python3.13 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[voice,desktop,memory]"
+
+cp .env.example .env      # then add GROQ_API_KEY, free, no card
+victor doctor
+```
+
+macOS also needs Accessibility permission for your terminal, in System Settings → Privacy & Security → Accessibility. `victor doctor` says so if it is missing.
+
+Only `GROQ_API_KEY` is required — it serves both text reasoning and speech-to-text. `GEMINI_API_KEY` adds the larger half of the vision budget and `GITHUB_TOKEN` raises Scout from 60 requests an hour to 5,000; `victor doctor` reports each as SKIP rather than FAIL when absent, because a missing optional key is not a broken install.
+
+The extras are optional and named after the phase that needs them: `voice` for the microphone and speech, `desktop` for reading and driving the screen, `memory` for semantic recall. Everything degrades with a stated reason rather than crashing when one is absent.
 
 Then:
 
@@ -146,9 +199,21 @@ victor do "what changed on main?"   # one task, printed
 victor do "..." --dry-run           # preview every action, execute none
 victor converse                     # hold a spoken conversation
 
+victor click "Compose" --dry-run     # what would be clicked, and its verdict
+victor click "Compose"              # click it, gated and journalled
+victor press "mod+s"                # mod is Ctrl on Windows, Command on macOS
+
 victor check "rm -rf build"         # how the safety layer grades a command
 victor journal list                 # what has been done, and what can be undone
 victor journal undo last            # reverse it, if an inverse exists
+
+victor index src/                   # read project files into local memory
+victor recall "connection refused"  # search it, offline and free
+victor memory                       # what Victor remembers, and how
+
+victor scout --user <handle>        # portfolio gap analysis, with citations
+victor hud                          # live status strip with the quota counter
+victor bench --traces               # the measured table, from real sessions
 ```
 
 `victor do` runs the ReAct loop: the model picks a tool, reads the result, and decides again, up to a step and token budget it reports at the end. `victor converse` wires that between the microphone and the speaker.

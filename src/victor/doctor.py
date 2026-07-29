@@ -1,9 +1,17 @@
 """Pre-flight checks.
 
-``victor doctor`` is the first thing anyone runs and the last thing to lie.
-Checks that cover unbuilt phases report PENDING, not OK - a green tick for a
-microphone pipeline that does not exist yet would make the whole command
-worthless.
+``victor doctor`` is the first thing anyone runs and the last thing to lie. It
+carries the project's exit gate: a stranger should be able to clone the repo,
+follow the README, and get here without asking anybody a question.
+
+Three statuses do the work. FAIL means something is broken and blocks the exit
+code. WARN means degraded but usable, with a stated reason. SKIP means a
+capability was not installed or a key was not set, which is a smaller install
+rather than a broken one.
+
+The distinction is load-bearing. A locked screen was FAIL until it made the
+command exit non-zero because a screen saver had kicked in - a false alarm is
+how a preflight check teaches people to ignore it.
 """
 
 from __future__ import annotations
@@ -65,11 +73,10 @@ def _check_runtime() -> Iterator[Check]:
 
 def _check_config(settings: Settings) -> Iterator[Check]:
     required = {"groq_api_key": "GROQ_API_KEY"}
-    # Keys whose consumer is not built yet. Reporting a missing one as WARN
-    # would imply the capability exists and is merely degraded, which is the
-    # kind of overstatement the PENDING convention exists to prevent.
-    unused_yet = {"gemini_api_key": ("GEMINI_API_KEY", "vision", "P4")}
-    optional = {"github_token": ("GITHUB_TOKEN", "Scout", "P7")}
+    optional = {
+        "gemini_api_key": ("GEMINI_API_KEY", "the larger half of the vision budget"),
+        "github_token": ("GITHUB_TOKEN", "Scout's 5,000-an-hour GitHub budget"),
+    }
 
     for field, env in required.items():
         if settings.has(field):
@@ -83,10 +90,13 @@ def _check_config(settings: Settings) -> Iterator[Check]:
                 "Free key: https://console.groq.com/keys",
             )
 
-    for field, (env, feature, phase) in {**unused_yet, **optional}.items():
-        detail = f"set - unused until {feature} lands in {phase}"
+    for field, (env, feature) in optional.items():
+        # SKIP rather than WARN: a missing optional key is a smaller install,
+        # not a broken one, and every consumer of these degrades with a stated
+        # reason rather than failing.
+        detail = f"set - adds {feature}"
         if not settings.has(field):
-            detail = f"not set - only needed once {feature} lands in {phase}"
+            detail = f"not set - optional, adds {feature}"
         yield Check(f"key {env}", Status.SKIP, detail)
 
 
@@ -134,7 +144,7 @@ def _check_dependencies() -> Iterator[Check]:
                 f"deps {label}",
                 Status.SKIP,
                 f"missing {', '.join(missing)}",
-                hint=f"pip install -e '.[{extra}]' when you reach that phase",
+                hint=f"pip install -e '.[{extra}]'",
             )
 
     backend_module, backend_label = {
@@ -323,13 +333,18 @@ def _check_perception(settings: Settings) -> Iterator[Check]:
     if ok:
         yield Check(label, Status.OK, detail)
     elif platform.system() in ("Windows", "Darwin"):
+        # A locked screen is a state, not a broken install: it fixes itself the
+        # moment somebody logs back in. Reporting it as FAIL made `victor
+        # doctor` exit non-zero because a screen saver had kicked in, which is
+        # the sort of false alarm that teaches people to ignore the command.
+        transient = "locked" in detail or "not the one on screen" in detail
         yield Check(
             label,
-            Status.FAIL,
+            Status.WARN if transient else Status.FAIL,
             detail,
             hint="pip install -e '.[desktop]'"
             if "not installed" in detail
-            else "try `victor uia --demo` to see the output shape",
+            else "" if transient else "try `victor uia --demo` to see the output shape",
         )
     else:
         yield Check(label, Status.SKIP, detail)
@@ -415,10 +430,30 @@ def _check_memory(settings: Settings) -> Iterator[Check]:
         memory.close()
 
 
-def _check_pending() -> Iterator[Check]:
-    """Capabilities the README promises that later phases will deliver."""
-    yield Check("scout", Status.PENDING, "P7 not implemented")
-    yield Check("status HUD", Status.PENDING, "P8 not implemented")
+def _check_surface(settings: Settings) -> Iterator[Check]:
+    """P7 and P8: Scout's request budget, and whether the strip can be drawn."""
+    if settings.has("github_token"):
+        yield Check("scout", Status.OK, "authenticated - 5,000 GitHub requests an hour")
+    else:
+        yield Check(
+            "scout",
+            Status.WARN,
+            "unauthenticated - 60 GitHub requests an hour, enough for one small run",
+            hint="GITHUB_TOKEN raises it to 5,000. No scopes needed for public data.",
+        )
+
+    # Probed rather than assumed: tkinter ships with Python but a headless
+    # session, or a Homebrew Python built without Tk, has no display to draw
+    # on - and `victor hud --text` is the answer in both cases.
+    if find_spec("tkinter") is None:
+        yield Check(
+            "status HUD",
+            Status.WARN,
+            "tkinter not available",
+            hint="`victor hud --text` draws in the terminal instead",
+        )
+    else:
+        yield Check("status HUD", Status.OK, "tkinter available - `victor hud`")
 
 
 def _check_tooling() -> Iterator[Check]:
@@ -446,5 +481,5 @@ def run_checks(settings: Settings, *, network: bool = True) -> list[Check]:
         checks += list(_check_network(settings))
     else:
         checks.append(Check("network", Status.SKIP, "--no-network"))
-    checks += list(_check_pending())
+    checks += list(_check_surface(settings))
     return checks
