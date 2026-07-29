@@ -2,7 +2,7 @@
 
 A voice-driven computer-use agent for **Windows and macOS** that runs entirely on free API tiers — because it reads the accessibility tree instead of guessing pixels.
 
-**Status: P0–P5 complete.** Plumbing, voice I/O, the agent core, the safety layer, screen perception and desktop actuation are built and tested. Everything below the P5 line is not implemented yet, and `victor doctor` says so out loud rather than reporting a green tick for a pipeline that does not exist.
+**Status: P0–P6 complete.** Plumbing, voice I/O, the agent core, the safety layer, screen perception, desktop actuation and local memory are built and tested. Everything below the P6 line is not implemented yet, and `victor doctor` says so out loud rather than reporting a green tick for a pipeline that does not exist.
 
 Two documents, deliberately separate: [docs/PLAN.md](docs/PLAN.md) is the plan of record — what was intended, why, and what was deliberately cut. [docs/BUILD-LOG.md](docs/BUILD-LOG.md) is what actually happened, including the decisions that changed during implementation and the measured numbers.
 
@@ -68,7 +68,7 @@ Phases are units of execution and integration, not a calendar. Each has an exit 
 - [x] **P3 · Safety & Reversibility** — interceptor, dry-run, kill switch, action journal + undo
 - [x] **P4 · Screen Perception** — UIA tree reader, screen capture, vision fallback (parallelizable)
 - [x] **P5 · Desktop Actuation** — clicks and typing driven by accessibility handles, gated by P3, using P4
-- [ ] **P6 · Memory** — FAISS + fastembed, auto-captured error/fix pairs, recall injection
+- [x] **P6 · Memory** — FAISS + fastembed, auto-captured error/fix pairs, recall injection
 - [ ] **P7 · Scout** — GitHub portfolio gap analysis, reusing P6's embedding stack
 - [ ] **P8 · Surface & Ship** — HUD, benchmarks, tests, demo
 
@@ -104,6 +104,8 @@ Stated upfront rather than discovered later:
 - **Actuation is off by default.** Clicking and typing exist on both platforms, but the agent only gets them when you pass `--desktop`. These tools act on whatever window is in front rather than inside a directory Victor was pointed at, which is a different kind of permission.
 - **Actuation is verified on both, at different depths.** macOS is verified end to end, including a two-task GUI run. Windows has had one smoke test against File Explorer: perception and a real click through UI Automation's Invoke both worked, and it found four defects — all now fixed, with regression tests. See the [build log](docs/BUILD-LOG.md#p5--desktop-actuation-) for what has and has not been exercised there.
 - **A locked screen looks like an empty one.** Both platforms stop reporting window geometry when locked, so Victor checks and says so rather than reporting a window with no controls.
+- **Memory is semantic only with the extra installed.** `pip install -e '.[memory]'` pulls a ~130 MB ONNX model that matches paraphrases. Without it, recall falls back to a hashed bag of words that finds a traceback it has seen almost verbatim and nothing more. `victor doctor` reports which one is live, because "Victor remembers" means two different things.
+- **Memory watches the shell only.** A failing `git` or desktop action does not consult it yet.
 - **Free-tier numbers are declared, not discovered.** Providers change allowances without notice. The routing table in [src/victor/providers/registry.py](src/victor/providers/registry.py) states them conservatively, so Victor under-uses a generous tier rather than hitting a 429 mid-demo.
 
 ## Setup
@@ -184,6 +186,23 @@ A plausible-looking undo would be worse than none — it would encourage approvi
 **The kill switch is cooperative, not a `SIGKILL`** — killing mid-write would lose the journal entry for the action in flight, which is the one you would most want. Ctrl-C, or saying "stop" during `victor converse`, trips a flag that three checkpoints observe: between loop steps, before a tool runs, and inside the shell wait loop. Measured abort latency on a running `sleep 30`: **26 ms**.
 
 Developing on macOS is supported for everything including P4/P5; Linux for everything except them — see the [development environment notes](docs/BUILD-LOG.md#development-environment), which include the Homebrew `pyexpat` and macOS hidden-`.pth` workarounds.
+
+## Remembering what it already worked out
+
+Nobody curates a knowledge base of their own mistakes, so Victor builds one by watching. When a shell command fails and the *same command* later succeeds, whatever ran in between is stored as the fix:
+
+```console
+$ python3 app.py                     ok=False  ModuleNotFoundError: No module named 'helper'
+$ ls                                 ok=True   ← ignored, this is looking around
+$ printf 'def greet...' > helper.py  ok=True   ← recorded as the intervention
+$ python3 app.py                     ok=True   → remembered how python3 was fixed
+```
+
+Hit the same error again in a later session and the fix comes back — in **2.5 ms**, from a local ONNX model and a SQLite file, with **zero API calls** and no quota spent. `victor recall "<anything>"` searches it by hand, and `victor index <path>` adds project files.
+
+"A later command succeeded" would have been the easier rule and a worse one: `pytest` fails, `ls` succeeds, and *"the fix is ls"* gets recalled confidently next time. Requiring the failing command itself to recover makes the pair verifiable rather than inferred — and when it never recovers, nothing is stored, because nothing has been learned.
+
+Recall stays quiet below a relevance floor. A vector store always returns its nearest neighbour, and nearest is not relevant; an injected wrong memory is worse than none, because it arrives as prior experience and gets treated as evidence.
 
 ## Credits
 

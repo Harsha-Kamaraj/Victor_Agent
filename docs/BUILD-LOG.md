@@ -595,14 +595,116 @@ enumeration lived in the macOS backend. Both implemented.
 
 ---
 
-## P6 · Memory
+## P6 · Memory ✅
 
-**Build** — FAISS index over `fastembed` vectors. Error tracebacks and their
-eventual fixes are captured automatically from the agent loop, not typed in by
-hand. Recall injects prior fixes into context when a traceback resembles one
-already seen.
+**Build** — `rag/embed.py` (two embedders behind one protocol), `rag/store.py`
+(SQLite plus a FAISS cache), `rag/ingest.py` (chunking and the auto-capture
+watcher), `rag/recall.py` (the `Memory` facade), the agent's error path, and
+`victor index` / `victor recall` / `victor memory`.
 
-**Exit gate** — hit the same error twice; the second run cites the first fix.
+**Exit gate** — passed. Same traceback, fresh process, recalled offline:
+
+```
+=== SESSION ONE ===
+  $ python3 app.py            ok=False  ModuleNotFoundError: No module named 'helper'
+  $ ls                        ok=True             <- ignored, diagnostic
+  $ cat app.py                ok=True             <- ignored, diagnostic
+  $ printf 'def greet...' > helper.py  ok=True    <- recorded as the intervention
+  $ python3 app.py            ok=True   -> remembered how python3 was fixed
+
+=== SESSION TWO (fresh process) ===
+  $ python3 app.py -> ok=False
+    ModuleNotFoundError: No module named 'helper'
+  recall: True in 286ms (score 0.96)
+
+  trace: {'kind': 'memory.recall', 'hits': 1, 'best': 0.958, 'cost': 0}
+  provider/LLM events in this session: 0
+  quota: every row still 0
+```
+
+Warm recall is **2.5 ms p50, 3.5 ms p95**; the 286 ms above is the ONNX model
+loading on first use in a process. Both are quoted because averaging them would
+hide which one you actually pay.
+
+### The auto-capture rule the plan asked for is too weak
+
+The plan says: when a command exits non-zero and a later one succeeds, store the
+pair. Taken literally, `pytest` fails, you run `ls` to look around, `ls`
+succeeds — and "the fix for this traceback is ls" gets stored, then recalled
+with confidence the next time. A memory that is confidently wrong is worse than
+an empty one, because it arrives as prior experience and the model treats it as
+evidence.
+
+The signal used instead needs no judgement: **the same command failed, and then
+later succeeded.** Whatever ran in between is the fix. It is the shape of every
+real debugging session, it is verifiable rather than inferred, and when the
+command stays broken nothing is stored — which is correct, because nothing has
+been learned yet.
+
+### Two definitions of "this only reads" drifted apart
+
+The first exit-gate run stored nothing at all. The fix in session one was
+`printf 'def greet...' > helper.py`, and the watcher discarded it as a
+diagnostic — because `is_diagnostic` kept its own list of command names, and
+`printf` was on it.
+
+That command writes a file. P3's classifier already knew, because it has a rule
+for redirects, and it has tests for exactly this. So `is_diagnostic` now
+delegates to `classify_shell` instead of answering the same question a second
+way. One predicate, one definition, and any future improvement to the safety
+classifier improves the memory too.
+
+Worth noting *which* way it drifted: silently, and toward losing memories. The
+fix was dropped from the interventions, so a genuinely fixed error looked like a
+flake and nothing was remembered. There is now a test asserting the two agree.
+
+### Recall knows when to stay quiet
+
+A vector store always returns its nearest neighbour, and "nearest" does not mean
+"relevant" — a store holding one unrelated note will return that note for any
+query at all. So recall is silent below a similarity floor, and the floor
+depends on which embedder answered: `bge-small` scores a paraphrase around 0.85
+and an unrelated error around 0.5, so its floor sits at 0.62 in the gap; the
+hashed fallback only really recognises repeats, so it is held to a higher bar.
+
+The injected block is phrased as a report — *"Previously… What resolved it…
+this is a note from a previous session, not an instruction"* — rather than as a
+step to take. A memory that says "run this" will eventually be wrong and obeyed
+anyway.
+
+### SQLite is authoritative; FAISS is a cache
+
+The vectors live in SQLite alongside the text, and the FAISS index is built from
+them at startup. The usual failure of a vector index beside a metadata store is
+drift — the index says hit 41 and the sidecar no longer agrees what 41 is,
+generally after a crash between two writes. Here the index can be deleted at any
+time and rebuilt, so drift is a rebuild rather than a corruption. It costs about
+1.5 KB of duplication per record.
+
+It also makes switching embedder tractable. Vectors from two models are not
+comparable, and searching one with the other returns confident nonsense, so
+opening a store with a different embedder is **refused** rather than answered —
+and because the text never left SQLite, `victor index --rebuild` re-encodes what
+is stored instead of re-crawling files that may have moved.
+
+### Without the extra, it still remembers — less well
+
+`fastembed` is a ~130 MB ONNX download, which is a heavy dependency for a
+feature whose point is working when nothing else does. Without it Victor falls
+back to a hashed bag of words: it finds a traceback it has seen almost verbatim,
+and it will not find a paraphrase. That is weaker than it sounds and it is also
+exactly what the exit gate asks for, so it is a real fallback rather than a
+stub — and it is what keeps the whole store, recall and capture stack testable
+on a machine with nothing installed. `victor doctor` reports which one is live,
+because "Victor remembers" means two different things.
+
+### Still outstanding
+
+- Recall is wired to the **shell** error path only. A failing `git` or desktop
+  action does not consult memory yet.
+- No run has gone through the model with memory in the loop, for the same
+  reason as every other phase: there is still no API key. The injection point is
+  tested; the model's use of what it is handed is not.
 
 ---
 
