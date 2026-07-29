@@ -45,6 +45,35 @@ def test_doctor_fails_without_the_required_key(tmp_path: Path) -> None:
     assert any("GROQ_API_KEY" in c.name for c in failed)
 
 
+def test_an_optional_key_that_is_set_does_not_report_skip(tmp_path: Path) -> None:
+    """It reported SKIP beside a detail reading "set" - a contradiction in one
+    line, and the fastest way to teach someone to stop reading the output."""
+    settings = Settings(
+        _env_file=None,
+        GROQ_API_KEY="test-groq",
+        GEMINI_API_KEY="test-gemini",
+        GITHUB_TOKEN="test-token",
+        VICTOR_DATA_DIR=str(tmp_path),
+    )
+    names = {c.name: c for c in run_checks(settings, network=False)}
+
+    for env in ("GEMINI_API_KEY", "GITHUB_TOKEN"):
+        check = names[f"key {env}"]
+        assert check.status is Status.OK, f"{env} is set but reported {check.status}"
+        assert check.detail.startswith("set")
+
+
+def test_an_optional_key_that_is_absent_reports_skip(tmp_path: Path) -> None:
+    """SKIP rather than FAIL: a smaller install, not a broken one."""
+    settings = Settings(
+        _env_file=None, GROQ_API_KEY="test-groq", VICTOR_DATA_DIR=str(tmp_path)
+    )
+    names = {c.name: c for c in run_checks(settings, network=False)}
+
+    assert names["key GEMINI_API_KEY"].status is Status.SKIP
+    assert not names["key GEMINI_API_KEY"].blocking
+
+
 def test_nothing_is_reported_as_unbuilt_now_that_every_phase_shipped(
     settings: Settings,
 ) -> None:

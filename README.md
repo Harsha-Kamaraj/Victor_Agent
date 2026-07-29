@@ -2,7 +2,7 @@
 
 A voice-driven computer-use agent for **Windows and macOS** that runs entirely on free API tiers — because it reads the accessibility tree instead of guessing pixels.
 
-**Status: all eight phases complete.** 713 tests, and `victor doctor` reports what is genuinely unavailable on your machine rather than a green tick for something that does not work.
+**Status: all eight phases complete.** 715 tests, and `victor doctor` reports what is genuinely unavailable on your machine rather than a green tick for something that does not work.
 
 Two documents, deliberately separate: [docs/PLAN.md](docs/PLAN.md) is the plan of record — what was intended, why, and what was deliberately cut. [docs/BUILD-LOG.md](docs/BUILD-LOG.md) is what actually happened, including the decisions that changed during implementation and the measured numbers.
 
@@ -116,15 +116,17 @@ Not projected — run `victor bench voice` and get these on your own machine. Ma
 
 Piper emits one chunk per sentence, so a one-sentence reply gets no benefit from streaming playback — time-to-first-audio *is* the synthesis time. Across three sentences it drops from 109 ms to 42 ms. Both are reported because averaging them would hide the effect.
 
-STT round trip and the full voice→voice loop are **not measured yet** — they need a live `GROQ_API_KEY`. `victor bench voice --stt` measures them, and spends real audio quota to do it.
+STT round trip and the full voice→voice loop are **not measured yet**. The key that blocked them is now set, so what's left is running it: `victor bench voice --stt` measures both, and spends real audio quota to do it.
 
 ## What this can't do
 
 Stated upfront rather than discovered later. This section is longer than most projects' and that is deliberate — it is the part a reader can check.
 
-**Never run with a live API key.** The single largest gap. There is no `GROQ_API_KEY` on the development machine, so no run has gone voice → model → tool → speech end to end. Every provider path is tested against `httpx.MockTransport`, which proves the request shapes and the error handling and proves nothing about the models' behaviour. The ReAct loop, the tool schemas and the prompts are unexercised by a real model.
+**Only the text path has met a real model.** Keys are now set, and `victor do "what branch am I on and what changed?"` runs against live Groq: the model picked the `git` tool, read the result, and answered correctly in 2 steps, 2 API calls, 1,778 tokens and 1.4 s. That retires the largest gap this section used to open with — the ReAct loop, the tool schemas and the prompts have now been exercised by something other than a mock.
 
-- **Not sub-500ms.** Voice → shell is ~600–900 ms. Voice → vision → act → speak is 2–6 s. Those two remain estimates for the reason above; the voice-stack numbers below are real.
+What still hasn't: **speech-to-text**, **vision**, and **memory with a model in the loop**. Each is tested against `httpx.MockTransport`, which proves the request shapes and the error handling and proves nothing about the models' behaviour. Nothing has gone voice → model → tool → speech end to end.
+
+- **Not sub-500ms.** Voice → shell is ~600–900 ms. Voice → vision → act → speak is 2–6 s. Both remain estimates: the model half is now real but the voice half has not been measured against it. The voice-stack numbers below are real.
 - **Push-to-talk is terminal-scoped.** `victor listen --mode ptt` starts and stops on Enter. A system-wide hotkey needs an OS-level hook and lands with the HUD in P8.
 - **Not always-on.** The free vision tier is ~250 requests/day, so screen capture happens on demand, never as a continuous stream.
 - **Targeted app support.** UIA is tuned for File Explorer, Edge/Chrome, Windows Settings, and VS Code. Other apps may work but aren't guaranteed.

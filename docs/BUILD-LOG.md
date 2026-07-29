@@ -1002,3 +1002,54 @@ the previous code, which is how I know they test something.
 - The same one as everything else: no run has gone through a live model with
   memory in the loop. The injection point is tested; what a model does with a
   recalled fix is not.
+
+---
+
+## First live model *(added after P8)*
+
+Every phase up to here shipped with the same caveat attached: no API key on the
+development machine, so every provider path was proven against
+`httpx.MockTransport` and nothing else. That is now closed for the text tier.
+
+Groq, Gemini and GitHub keys are set; `victor doctor` authenticates all three
+against the real services — **29 ok, 2 warn, 0 fail**. The two warnings are a
+Piper voice not yet downloaded, and no TTY to ask for confirmation on, which is
+an artefact of how the check was invoked rather than a fault.
+
+**The P2 exit gate, re-run against a live model rather than a fake:**
+
+```console
+$ victor do "what branch am I on and what changed?"
+  ok git(subcommand='status')
+       On branch main
+You are on the main branch. The working tree has unstaged changes in two
+files: src/victor/doctor.py and tests/test_config_and_cli.py.
+answered in 2 steps, 2 API calls, 1778 tokens, 1417ms; 1/1 tool calls free
+```
+
+Correct, and correct about the two files that were actually modified. The tool
+schema, the argument shapes and the result-feedback path all survived contact
+with a real model, which until now was an assumption.
+
+Two things this does **not** establish, and the README says so: speech-to-text
+and vision have still only met a mock, and no run has gone voice → model →
+tool → speech end to end.
+
+### Two environment defects found on the way
+
+**`victor` would not start at all.** The editable install's `.pth` file was
+flagged `UF_HIDDEN`, and Python 3.13 skips hidden `.pth` files — a failure
+already noted under [development environment](#development-environment). It was
+worse than documented: the flag was set on the *entire* `.venv` tree, so
+clearing it on one file was undone as soon as anything else touched the
+directory, and the file was also missing its trailing newline. `chflags -R
+nohidden .venv` fixes it for good. `pytest` never saw any of this because it is
+configured with `pythonpath = ["src"]` — which is exactly why that line exists,
+and also why a green suite was not evidence the CLI worked.
+
+**`doctor` reported SKIP beside a detail reading "set".** An optional key that
+is present was still given `Status.SKIP`, because the status was chosen once
+for both branches while only the detail string varied. A contradiction inside a
+single line is the fastest way to teach someone to stop reading the output, and
+it was reporting a key the user had just gone and fetched as though it had been
+ignored. Both branches now pick their own status, with a test for each.

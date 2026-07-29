@@ -91,13 +91,15 @@ def _check_config(settings: Settings) -> Iterator[Check]:
             )
 
     for field, (env, feature) in optional.items():
-        # SKIP rather than WARN: a missing optional key is a smaller install,
-        # not a broken one, and every consumer of these degrades with a stated
-        # reason rather than failing.
-        detail = f"set - adds {feature}"
-        if not settings.has(field):
-            detail = f"not set - optional, adds {feature}"
-        yield Check(f"key {env}", Status.SKIP, detail)
+        # SKIP rather than WARN when absent: a missing optional key is a smaller
+        # install, not a broken one, and every consumer of these degrades with a
+        # stated reason rather than failing. When it *is* set, though, the status
+        # has to say so - reporting SKIP next to a detail reading "set" is the
+        # kind of contradiction that teaches people to stop reading the output.
+        if settings.has(field):
+            yield Check(f"key {env}", Status.OK, f"set - adds {feature}")
+        else:
+            yield Check(f"key {env}", Status.SKIP, f"not set - optional, adds {feature}")
 
 
 def _check_storage(settings: Settings) -> Iterator[Check]:
