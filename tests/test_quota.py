@@ -68,6 +68,65 @@ def test_daily_window_rolls_over(tmp_path: Path, clock) -> None:
     assert status.requests_remaining == 5
 
 
+def test_each_provider_rolls_over_in_its_own_timezone(tmp_path: Path, clock) -> None:
+    """The whole reason the ledger stores a timezone per model. Groq's day ends
+    at UTC midnight and Google's at midnight Pacific, so at 3am UTC one has
+    reset and the other has hours left to run - and a ledger that used one
+    clock for both would hand back an allowance nobody has."""
+    from datetime import UTC, datetime
+
+    groq = QuotaLimits(requests_per_day=1, reset_timezone="UTC")
+    google = QuotaLimits(requests_per_day=1, reset_timezone="America/Los_Angeles")
+
+    # 23:30 UTC on the 1st: still the 1st in both places (16:30 in California).
+    clock.now = datetime(2026, 3, 1, 23, 30, tzinfo=UTC).timestamp()
+    ledger = make(tmp_path, clock)
+    ledger.record("groq:m", groq)
+    ledger.record("google:m", google)
+    assert not ledger.check("groq:m", groq).allowed
+    assert not ledger.check("google:m", google).allowed
+
+    # 00:30 UTC on the 2nd. UTC has rolled; California is still on the 1st.
+    clock.advance(3600)
+    assert ledger.check("groq:m", groq).allowed, "UTC midnight should have reset Groq"
+    assert not ledger.check("google:m", google).allowed, "Pacific has not rolled yet"
+
+    # 08:30 UTC is 00:30 Pacific - now it has.
+    clock.advance(8 * 3600)
+    assert ledger.check("google:m", google).allowed
+
+
+def test_a_rollover_clears_the_per_minute_window_too(tmp_path: Path, clock) -> None:
+    """A new day with yesterday's trailing minute still in the bucket would
+    refuse the first call of the morning for a burst nobody made."""
+    limits = QuotaLimits(requests_per_minute=2, requests_per_day=100)
+    ledger = make(tmp_path, clock)
+    ledger.record(KEY, limits)
+    ledger.record(KEY, limits)
+    assert not ledger.check(KEY, limits).allowed
+
+    clock.advance(24 * 3600)
+    assert ledger.check(KEY, limits).allowed
+
+
+def test_a_rollover_survives_being_written_and_reopened(tmp_path: Path, clock) -> None:
+    """The rollover happens on read, so it has to work on a ledger that was
+    persisted yesterday and opened today - which is the only way it ever
+    actually happens in real use."""
+    ledger = make(tmp_path, clock)
+    for _ in range(5):
+        ledger.record(KEY, LIMITS)
+    ledger.flush()
+    assert not ledger.check(KEY, LIMITS).allowed
+
+    clock.advance(24 * 3600)
+    reopened = QuotaLedger(tmp_path / "quota.json", clock=clock)
+    status = reopened.check(KEY, LIMITS)
+    assert status.allowed
+    assert status.requests_remaining == 5
+    assert reopened.usage(KEY) == (0, 0, 0.0)
+
+
 def test_audio_seconds_budget(tmp_path: Path, clock) -> None:
     limits = QuotaLimits(audio_seconds_per_day=100.0)
     ledger = make(tmp_path, clock)

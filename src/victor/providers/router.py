@@ -12,7 +12,7 @@ built in later phases stay thin.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Container
 
 from ..config import Settings
 from ..errors import NoProviderAvailable
@@ -108,16 +108,30 @@ class Router:
     # -- selection ---------------------------------------------------------
 
     def select(
-        self, workload: Workload, *, tokens: int = 0, audio_seconds: float = 0.0
+        self,
+        workload: Workload,
+        *,
+        tokens: int = 0,
+        audio_seconds: float = 0.0,
+        skip: Container[str] = (),
     ) -> Selection:
         """Pick a model, or raise :class:`NoProviderAvailable`.
 
         ``tokens``/``audio_seconds`` are an estimate of the call's size; they
         let the router skip a model that has requests left but not enough
         token headroom this minute.
+
+        ``skip`` names models to pass over for this selection only, without
+        touching the ledger. It exists for the caller that has just been
+        rate-limited by a provider whose limit is measured in seconds: the
+        model is unusable *now* and fine in a minute, so refusing it here is
+        right and writing that into the day's accounting is not.
         """
         rejected: list[tuple[str, str]] = []
         for spec in self.chain(workload):
+            if spec.key in skip:
+                rejected.append((spec.key, "rate limited a moment ago"))
+                continue
             status = self._availability(spec, tokens=tokens, audio_seconds=audio_seconds)
             if status.allowed:
                 selection = Selection(

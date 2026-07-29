@@ -14,7 +14,9 @@ takes over.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -140,10 +142,17 @@ class ChatClient:
         """One chat completion, falling down the routing chain on 429."""
         estimate = _estimate_tokens(messages, tools)
         exhausted: list[str] = []
+        # Keys, kept apart from the human-readable reasons above. These were
+        # one list, and `selection.key in exhausted` was therefore comparing a
+        # key against strings like "groq:x (retry after 8.5)" and never
+        # matching. Burning the day on every 429 hid it: the router stopped
+        # offering the model, so the guard was never the thing that stopped the
+        # loop. It is now.
+        tried: set[str] = set()
 
         while True:
             try:
-                selection = self._router.select(Workload.TEXT, tokens=estimate)
+                selection = self._router.select(Workload.TEXT, tokens=estimate, skip=tried)
             except NoProviderAvailable:
                 if exhausted:
                     raise ProviderError(
@@ -151,7 +160,7 @@ class ChatClient:
                     ) from None
                 raise
 
-            if selection.key in exhausted:
+            if selection.key in tried:
                 # The router handed back a model we already know is spent -
                 # nothing left to try.
                 raise ProviderError("every text model is rate limited: " + "; ".join(exhausted))
@@ -160,9 +169,11 @@ class ChatClient:
             try:
                 return self._call(selection, messages, tools, temperature, max_tokens)
             except _RateLimited as exc:
-                # Trust the provider over the ledger and burn the day's budget
-                # for this model, so the next select() moves on.
-                self._burn(selection)
+                # Trust the provider over the ledger about *being* limited. How
+                # long for is a separate question, and the answer is in the
+                # response - see _burn.
+                self._burn(selection, exc.retry_after)
+                tried.add(selection.key)
                 exhausted.append(f"{selection.key} ({exc})")
 
     # -- transport ---------------------------------------------------------
@@ -208,7 +219,7 @@ class ChatClient:
         latency_ms = (time.perf_counter() - started) * 1000
 
         if response.status_code == 429:
-            raise _RateLimited(response.headers.get("retry-after", "no retry-after"))
+            raise _RateLimited.from_response(response)
         if response.status_code in (401, 403):
             env = (selection.spec.credential or "api key").upper()
             raise ProviderError(f"{selection.key}: {env} rejected (HTTP {response.status_code})")
@@ -231,8 +242,29 @@ class ChatClient:
         )
         return reply
 
-    def _burn(self, selection: Selection) -> None:
-        """Mark a model spent after the provider contradicted the ledger."""
+    def _burn(self, selection: Selection, retry_after: float | None) -> None:
+        """Mark a model spent for the day, if that is what the 429 meant.
+
+        It used to mean it unconditionally, and that was too blunt. Providers
+        return 429 for tokens-per-minute as readily as for requests-per-day,
+        and Groq's says so: ``Please try again in 8.5s``. Recording the whole
+        day's allowance for an eight-second wait cost the primary text model
+        for the rest of the day - observed once with fifteen real calls made
+        and 1,000 phantom ones written to the ledger.
+
+        Falling through to the next model still happens either way; the caller
+        adds this one to ``exhausted`` regardless. The only question here is
+        whether the *ledger* should carry the claim into the next run, and a
+        wait measured in seconds is not evidence that it should.
+        """
+        if retry_after is not None and retry_after <= TRANSIENT_LIMIT_SECONDS:
+            self._trace.event(
+                "quota.transient",
+                model=selection.key,
+                retry_after=retry_after,
+                detail="short rate limit; the day's budget was not burned",
+            )
+            return
         limit = selection.spec.limits.requests_per_day
         if limit:
             self._router.record(selection, requests=limit)
@@ -242,7 +274,50 @@ class ChatClient:
 
 
 class _RateLimited(Exception):
-    """Internal: provider said 429."""
+    """Internal: provider said 429, and how long it wants us to wait."""
+
+    def __init__(self, detail: str, retry_after: float | None = None) -> None:
+        super().__init__(detail)
+        self.retry_after = retry_after
+
+    @classmethod
+    def from_response(cls, response: httpx.Response) -> _RateLimited:
+        """Read the wait out of the header, or out of the message.
+
+        The ``retry-after`` header is the standard place and Groq does not
+        always send it; when it does not, the human-readable body carries the
+        same number ("Please try again in 8.5s"). Reading both is the
+        difference between pausing for eight seconds and standing down a model
+        until tomorrow.
+        """
+        raw = response.headers.get("retry-after")
+        seconds = _seconds(raw)
+        body = ""
+        with contextlib.suppress(Exception):
+            body = response.text[:300]
+        if seconds is None:
+            match = _RETRY_IN.search(body)
+            seconds = _seconds(match.group(1)) if match else None
+        detail = raw or (f"retry in {seconds}s" if seconds is not None else "no retry-after")
+        return cls(detail, seconds)
+
+
+#: A 429 that clears sooner than this is a short window - tokens per minute,
+#: usually - not the day's allowance running out.
+TRANSIENT_LIMIT_SECONDS = 15 * 60
+
+_RETRY_IN = re.compile(r"try again in ([0-9]+(?:\.[0-9]+)?)\s*s", re.IGNORECASE)
+
+
+def _seconds(raw: str | None) -> float | None:
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        # `retry-after` may also be an HTTP date. Treating an unparseable value
+        # as "no idea" is right: unknown must not mean "the day is gone".
+        return None
 
 
 def _parse(body: dict[str, Any], model: str, latency_ms: float) -> Reply:

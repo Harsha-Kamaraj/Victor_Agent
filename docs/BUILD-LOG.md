@@ -1156,3 +1156,95 @@ seconds became under three, and the recall that caused it spent nothing.
 
 The `action` field in that trace line is new today: the hook used to record
 `command` and fire only for the shell.
+
+---
+
+## `victor selftest` *(added after P8)*
+
+`victor doctor` asks whether this machine is set up. Every phase's exit gate
+asks something harder - does the thing still do what the phase claimed - and
+until now checking that meant working through PLAN.md by hand, which is why the
+record of when each gate last held lived in prose rather than in code.
+
+`victor selftest` runs them. Twelve gates, phase-ordered, each one printing the
+claim it is checking and the evidence it found:
+
+```
+OK  P0  routing falls through when a provider's free tier is spent
+        gemini:gemini-2.5-flash spent -> fell through to groq:llama-4-scout
+OK  P3  an irreversible command is refused and a risky one is gated
+        7 commands classified as the plan requires
+OK  P6  a fix is captured unprompted and recalled with no API call
+        captured shell and desktop fixes; recalled at 0.96 in 6ms, 0 API calls
+OK  P1  speech becomes text through Groq Whisper
+        said it and heard 'The quick brown fox.' back
+OK  P2  the model chooses a tool, reads the result, and answers
+        2 steps, 1585 tokens, 1/1 tool calls free
+
+12 passed, 0 failed, 4 skipped, 3 API requests spent
+```
+
+Three rules, all inherited from `doctor`. A gate that cannot run here is SKIP
+with the reason - a locked screen, no microphone, no key - never a quiet pass.
+Nothing spends quota unless `--live` is passed, and the command says what it
+will cost before spending it. And a gate that raises becomes a FAIL carrying
+the exception, because a self-test that dies half way through has told you less
+than one that reports.
+
+The P1 gate is the one worth describing: it synthesises the test phrase with
+the local Piper voice, sends *that* to Whisper, and checks the words come back.
+No microphone, no recorded fixture to drift out of date, and it exercises both
+voice legs against each other.
+
+### It immediately found four things
+
+Three were my own mistakes writing the gates against APIs I had not read -
+`QuotaLedger.reserve` does not exist, `Risk.IRREVERSIBLE` does not exist, and
+`GitHubClient` takes a token rather than a `Settings`, so it spent one run
+sending the repr of a settings object as a bearer token and getting 401. Worth
+recording because the fourth was found the same way, and it was real.
+
+### A tokens-per-minute 429 was costing the whole day
+
+The P8 gate printed `1016 API calls today` on a machine that had made about
+fifteen. The ledger held 1,008 requests against `gpt-oss-120b`, 1,000 of them
+written in a single second, and the model was standing down as "daily request
+limit reached (1008/1000)".
+
+`ChatClient._burn` was the cause, and it had been there since P2. On any 429 it
+recorded the model's entire daily allowance, on the documented reasoning that
+[a 429 outranks the ledger](#a-429-outranks-the-ledger). That reasoning is
+right about *being* limited and silent about *for how long* - and providers
+return 429 for tokens-per-minute as readily as for requests-per-day. Groq even
+says which: `Please try again in 8.5s`.
+
+So an eight-second pause was being recorded as the day's budget, and the best
+text model in the chain became unavailable until midnight UTC after fifteen
+real calls. The 429 handler now reads `retry-after`, falls back to parsing the
+number out of the message when the header is absent, and only burns the day
+when the wait is long or unknown. Unknown still means the day: a real
+exhaustion misread as transient is a loop of 429s against a provider that has
+already said no.
+
+**And that exposed dead code.** The loop guarded against retrying a model with
+`if selection.key in exhausted`, where `exhausted` holds strings like
+`groq:x (retry after 8.5)`. It never matched. Burning the day on every 429 had
+hidden it perfectly - the router simply stopped offering the model, so the
+guard was never what ended the loop. With short 429s no longer burning, it
+became load-bearing, so keys are now tracked separately from reasons and
+`Router.select` takes a `skip` set: pass over this model for this call, without
+writing anything into the day's accounting.
+
+Four regression tests, one per branch - short wait, wait parsed from the body,
+long wait, and no wait given.
+
+### Quota rollover, finally covered
+
+The last thing on the P8 test list, and the one path that only fires at a
+timezone boundary. Three tests: that Groq's day ends at UTC midnight while
+Google's runs on for another eight hours, that a rollover clears the trailing
+per-minute window as well as the daily counters, and that it works on a ledger
+persisted yesterday and reopened today - which is the only way it ever actually
+happens.
+
+**737 tests.**

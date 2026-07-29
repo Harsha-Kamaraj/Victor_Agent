@@ -325,6 +325,69 @@ def test_provider_429_falls_through_to_the_next_model(settings: Settings) -> Non
     assert not ledger.check(GPT_OSS_120B.key, GPT_OSS_120B.limits).allowed
 
 
+def test_a_per_minute_429_does_not_cost_the_whole_day(settings: Settings) -> None:
+    """Observed live: fifteen real calls made, 1,000 phantom ones written, and
+    the best text model unavailable until tomorrow - because Groq said "try
+    again in 8.5s" and that was read as the day's allowance running out."""
+    script = Script(
+        httpx.Response(429, json={}, headers={"retry-after": "8.5"}),
+        assistant("answered by the fallback"),
+    )
+    agent, ledger = make_agent(settings, script)
+    result = agent.run("hello")
+
+    assert result.ok
+    assert script.requests[1]["model"] == LLAMA_33_70B.model  # still fell through
+    requests, _, _ = ledger.usage(GPT_OSS_120B.key)
+    assert requests == 1, f"a short wait burned {requests} requests"
+    assert ledger.check(GPT_OSS_120B.key, GPT_OSS_120B.limits).allowed
+
+
+def test_a_retry_after_in_the_body_is_read_when_the_header_is_missing(
+    settings: Settings,
+) -> None:
+    """Groq does not always send the header; it always says it in the message."""
+    body = {
+        "error": {
+            "message": (
+                "Rate limit reached for model `openai/gpt-oss-120b` on tokens per "
+                "minute (TPM): Limit 6000. Please try again in 7.482s."
+            )
+        }
+    }
+    agent, ledger = make_agent(
+        settings, Script(httpx.Response(429, json=body), assistant("fallback"))
+    )
+    agent.run("hello")
+
+    requests, _, _ = ledger.usage(GPT_OSS_120B.key)
+    assert requests == 1
+
+
+def test_a_long_429_still_stands_the_model_down_for_the_day(settings: Settings) -> None:
+    """The original behaviour, kept: when the wait really is the day, the
+    ledger should carry that into the next run rather than rediscovering it."""
+    script = Script(
+        httpx.Response(429, json={}, headers={"retry-after": "7200"}),
+        assistant("answered by the fallback"),
+    )
+    agent, ledger = make_agent(settings, script)
+    agent.run("hello")
+
+    assert not ledger.check(GPT_OSS_120B.key, GPT_OSS_120B.limits).allowed
+
+
+def test_a_429_with_no_wait_given_is_treated_as_the_day(settings: Settings) -> None:
+    """Unknown must not mean "carry on" - that is how a real exhaustion turns
+    into a loop of 429s against a provider that has already said no."""
+    agent, ledger = make_agent(
+        settings, Script(httpx.Response(429, json={}), assistant("fallback"))
+    )
+    agent.run("hello")
+
+    assert not ledger.check(GPT_OSS_120B.key, GPT_OSS_120B.limits).allowed
+
+
 def test_every_model_rate_limited_reports_clearly(settings: Settings) -> None:
     agent, _ = make_agent(
         settings, Script(*[httpx.Response(429, json={}) for _ in range(5)])

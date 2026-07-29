@@ -109,6 +109,59 @@ def doctor(
 
 
 @app.command()
+def selftest(
+    live: Annotated[
+        bool,
+        typer.Option("--live", help="Also run the gates that need a real model."),
+    ] = False,
+    yes: Annotated[
+        bool, typer.Option("--yes", help="Skip the confirmation before spending quota.")
+    ] = False,
+) -> None:
+    """Run every phase's exit gate and report which ones still hold.
+
+    `victor doctor` asks whether this machine is set up. This asks the harder
+    question: does each phase still do what it claimed. Nothing spends quota
+    unless you pass --live.
+    """
+    from .selftest import Report, live_cost, run_gates
+
+    settings = _settings()
+
+    if live and not yes:
+        console.print(
+            f"[yellow]--live[/yellow] spends up to {live_cost()} provider "
+            "requests (a model call, a transcription and one image)."
+        )
+        if not typer.confirm("Continue?", default=True):
+            raise typer.Abort()
+
+    table = Table(box=None, pad_edge=False, show_header=False)
+    table.add_column("status", width=8)
+    table.add_column("phase", style="bold", width=4)
+    table.add_column("detail", overflow="fold")
+
+    gates: list = []
+    with console.status("running gates..."):
+        for gate in run_gates(settings, live=live):
+            gates.append(gate)
+            style, label = _STATUS_STYLE[gate.status]
+            table.add_row(
+                Text(label, style=style),
+                gate.phase,
+                f"{gate.claim}\n[dim]{gate.detail} ({gate.duration_ms:.0f}ms)[/dim]",
+            )
+    console.print(table)
+
+    report = Report(gates)
+    console.print()
+    if report.failed:
+        console.print(Text(f"gates failing: {report.summary()}", style="bold red"))
+        raise typer.Exit(1)
+    console.print(Text(report.summary(), style="bold green"))
+
+
+@app.command()
 def quota(
     reset: Annotated[
         str | None,
