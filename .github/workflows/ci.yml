@@ -1,0 +1,102 @@
+name: CI
+
+# Windows is the platform Victor targets and the one nobody develops on, so it
+# is in the matrix rather than left to a person to remember. macOS is where the
+# work happens; Linux has no accessibility backend at all and is here to prove
+# the core does not quietly depend on one.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Every test that touches a provider does so through httpx.MockTransport.
+  # A key reaching CI would mean something is making a real call, so the
+  # absence of one here is part of the test.
+  VICTOR_STRICT_FREE_TIER: "true"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install ruff
+      - run: ruff check src tests
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing should not hide the others - the whole point of
+      # the matrix is finding out which one broke.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      # sounddevice binds PortAudio at import. The runner has no audio device
+      # and does not need one - ArraySource stands in for the microphone
+      # everywhere in the suite - but the shared library has to exist.
+      - name: Install PortAudio (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2
+
+      # Not `memory`: fastembed pulls a ~130 MB ONNX model on first use, and
+      # the hashed fallback is exercised by the minimal job below. Not a gap -
+      # HashEmbedder is what the suite runs against by design.
+      - run: pip install -e ".[voice,desktop,dev]"
+
+      - run: pytest -q --durations=10
+
+  minimal:
+    # The claim in the README is that every extra degrades with a stated reason
+    # rather than crashing. This is that claim, run.
+    name: minimal install (no extras)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+      # With nothing installed the CLI still has to run and still has to say
+      # what is missing, which is the part users actually meet.
+      - run: victor doctor --no-network || true
+      - run: victor selftest
+
+  build:
+    name: wheel builds and installs clean
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install build
+      - run: python -m build
+      # An editable install hides packaging mistakes: it works from the source
+      # tree whatever the wheel actually contains.
+      - name: Install the wheel and run the CLI from it
+        run: |
+          pip install dist/*.whl
+          cd "$RUNNER_TEMP"
+          victor --version
+          victor models

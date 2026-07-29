@@ -71,12 +71,43 @@ def test_an_unavailable_capability_skips_rather_than_passes(
     monkeypatch.setattr(
         module,
         "_speak",
-        lambda *a, **k: None,  # no voice installed
+        lambda *a, **k: None,  # no voice model on disk
     )
     gate = module._p1_tts(settings)
 
     assert gate.status is Status.SKIP
-    assert "voice install" in gate.detail
+    # Two ways to be unavailable - no extra installed, no voice downloaded -
+    # and which one this machine hits depends on the machine. Both have to name
+    # the remedy, which is the part that matters; pinning either message would
+    # make this test fail on half the installs it is meant to protect.
+    assert "install" in gate.detail
+
+
+def test_a_missing_key_skips_rather_than_fails(tmp_path: Path) -> None:
+    """CI has no keys and a fresh clone has no keys. Both used to report FAIL
+    on the routing and voice gates - "not configured here" dressed up as
+    "broken", which is the exact confusion this command exists to prevent."""
+    bare = Settings(_env_file=None, VICTOR_DATA_DIR=str(tmp_path))
+    failed = [
+        f"{g.phase}: {g.claim} -> {g.detail}"
+        for g in selftest(bare).gates
+        if g.status is Status.FAIL
+    ]
+    assert not failed, failed
+
+
+def test_routing_is_checked_without_needing_a_key(tmp_path: Path) -> None:
+    """Which model the chain picks is arithmetic, not credentials - so it is
+    worth protecting on every push, including the pushes CI runs with no keys
+    at all. Standing in a placeholder spends nothing and calls nothing."""
+    from victor import selftest as module
+
+    bare = Settings(_env_file=None, VICTOR_DATA_DIR=str(tmp_path))
+    gate = module._p0_routing(bare)
+
+    assert gate.status is Status.OK, gate.detail
+    assert "fell through" in gate.detail
+    assert gate.cost == 0
 
 
 def test_live_gates_are_not_run_by_default(settings: Settings) -> None:

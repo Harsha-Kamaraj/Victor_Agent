@@ -1,7 +1,13 @@
 from __future__ import annotations
 
-import numpy as np
 import pytest
+
+# Audio is numpy arrays end to end, so these tests need it. Skipping is the
+# honest outcome on an install without the voice extra; importing at module
+# level would fail collection and take the other 700 tests down with it.
+pytest.importorskip("numpy")
+
+import numpy as np
 
 from victor.voice.audio import AudioFormat, silence, tone
 from victor.voice.sources import ArraySource

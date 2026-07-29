@@ -136,9 +136,24 @@ def _p0_routing(settings: Settings) -> tuple[Status, str]:
     from .providers import Router, Workload
     from .quota import QuotaLedger
 
+    # Which model the chain picks is pure logic - the ledger's arithmetic and
+    # the ordering of the table - and no key is needed to prove it falls
+    # through. But the router refuses a model whose key is absent, so on a
+    # machine with no keys (CI, or a fresh clone) there is no chain to walk.
+    # Stand in placeholders rather than skipping: nothing here makes a call,
+    # and this is exactly the kind of logic worth protecting on every push.
+    probe = settings
+    if not (settings.has("gemini_api_key") and settings.has("groq_api_key")):
+        probe = Settings(
+            _env_file=None,
+            GROQ_API_KEY="selftest-not-a-real-key",
+            GEMINI_API_KEY="selftest-not-a-real-key",
+            VICTOR_DATA_DIR=str(settings.data_dir),
+        )
+
     with TemporaryDirectory() as tmp:
         ledger = QuotaLedger(Path(tmp) / "quota.json")
-        router = Router(settings, ledger)
+        router = Router(probe, ledger)
         first = router.select(Workload.VISION)
 
         # Spend the primary's whole day in one write, then ask again. The gate
@@ -183,11 +198,20 @@ def _speak(settings: Settings, text: str):
     Shared by both voice gates: the STT gate needs something to transcribe, and
     generating it locally means the round trip can be checked without a
     microphone or a recorded fixture that would drift out of date.
-    """
-    import numpy as np
 
-    from .voice.audio import AudioFormat, Segment
-    from .voice.tts import PiperSynthesizer
+    ``None`` covers both ways this is unavailable - no voice extra installed,
+    and no voice model downloaded. The import has to be inside the try for the
+    first of those: it used to sit at the top of the function, so a machine
+    without the extra raised ModuleNotFoundError straight past the check below
+    and the gate reported FAIL for something that was merely not installed.
+    """
+    try:
+        import numpy as np
+
+        from .voice.audio import AudioFormat, Segment
+        from .voice.tts import PiperSynthesizer
+    except ImportError:
+        return None
 
     synth = PiperSynthesizer(settings.paths.ensure().models_dir, auto_download=False)
     if not synth.installed:
@@ -201,6 +225,8 @@ def _speak(settings: Settings, text: str):
 
 @_gate("P1", "text becomes speech locally, with no API call")
 def _p1_tts(settings: Settings) -> tuple[Status, str]:
+    if find_spec("numpy") is None:
+        return Status.SKIP, "voice extra not installed -> pip install -e '.[voice]'"
     segment = _speak(settings, "Victor self test.")
     if segment is None:
         return Status.SKIP, "no Piper voice installed -> victor voice install"

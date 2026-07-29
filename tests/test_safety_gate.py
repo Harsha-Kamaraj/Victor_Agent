@@ -251,6 +251,7 @@ class FakePipeline:
 
 
 def test_spoken_confirmation_accepts_a_yes() -> None:
+    pytest.importorskip("numpy")  # confirming out loud is the voice stack
     pipeline = FakePipeline("yes")
     confirmer = SpokenConfirmer(pipeline, fallback=DenyingConfirmer())
     request = ConfirmRequest("shell", "rm build.log", Classification(Risk.CONFIRM, "deletes files"))
@@ -261,6 +262,7 @@ def test_spoken_confirmation_accepts_a_yes() -> None:
 
 
 def test_spoken_confirmation_accepts_a_no() -> None:
+    pytest.importorskip("numpy")  # confirming out loud is the voice stack
     confirmer = SpokenConfirmer(FakePipeline("no"), fallback=DenyingConfirmer())
     request = ConfirmRequest("shell", "rm x", Classification(Risk.CONFIRM, "deletes"))
 
@@ -268,6 +270,7 @@ def test_spoken_confirmation_accepts_a_no() -> None:
 
 
 def test_spoken_confirmation_reasks_then_falls_back() -> None:
+    pytest.importorskip("numpy")  # confirming out loud is the voice stack
     pipeline = FakePipeline("banana", "gibberish")
     confirmer = SpokenConfirmer(pipeline, fallback=DenyingConfirmer())
     request = ConfirmRequest("shell", "rm x", Classification(Risk.CONFIRM, "deletes"))

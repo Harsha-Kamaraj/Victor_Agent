@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import pytest
+
+# Audio is numpy arrays end to end, so these tests need it. Skipping is the
+# honest outcome on an install without the voice extra; importing at module
+# level would fail collection and take the other 700 tests down with it.
+pytest.importorskip("numpy")
+
 from pathlib import Path
 
 import httpx
-import pytest
 
 from victor.config import Settings
 from victor.errors import ProviderError, QuotaExhausted

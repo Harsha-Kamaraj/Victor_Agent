@@ -368,6 +368,7 @@ def test_run_with_text_executes_one_task(
 
 
 def test_bench_takes_a_voice_flag(workspace: Path) -> None:
+    pytest.importorskip("numpy")  # the voice legs it measures are numpy
     result = runner.invoke(app, ["bench", "--voice", "--runs", "1"])
     assert result.exit_code == 0, result.output
     assert "vad endpointing" in result.output

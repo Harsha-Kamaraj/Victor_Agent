@@ -506,6 +506,7 @@ def test_availability_tries_a_capture_rather_than_an_import(
 ) -> None:
     """It reported "screen capture ready" on a machine where every backend
     failed, because it only asked whether mss could be imported."""
+    pytest.importorskip("PIL")
     from victor.desktop import ScreenCapture
     from victor.desktop import capture as capture_module
 
