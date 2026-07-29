@@ -56,7 +56,11 @@ desktop = [
     "mss>=10.0",
     "pillow>=11.0",
 ]
-# P6/P7 - memory and scout
+# P6/P7 - memory and scout.
+# Both optional by design: without them Victor falls back to a hashed bag of
+# words, which finds a repeated traceback but not a paraphrase of one. The
+# fallback is what keeps the store, recall and auto-capture testable with
+# nothing installed - see victor.rag.embed.
 memory = [
     "faiss-cpu>=1.9",
     "fastembed>=0.5",
