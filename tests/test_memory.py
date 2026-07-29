@@ -20,6 +20,7 @@ from victor.rag import (
     VectorStore,
     chunk_text,
     command_head,
+    describe_call,
     fingerprint,
     index_path,
     is_diagnostic,
@@ -298,6 +299,119 @@ def test_diagnostic_agrees_with_the_safety_classifier():
         assert is_diagnostic(command) is (classify_shell(command).risk is Risk.SAFE)
 
 
+# --- identity for tools that are not the shell -----------------------------
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments", "head"),
+    [
+        ("shell", {"command": "pytest -x tests/"}, "pytest"),
+        ("git", {"subcommand": "push", "args": ["origin", "main"]}, "git push"),
+        ("click", {"index": 4, "label": "Save"}, "click Save"),
+        # The index moves as the tree re-sorts; the label is what was meant.
+        ("click", {"index": 9, "label": "Save"}, "click Save"),
+        ("click", {"index": 4}, "click 4"),
+        ("press_keys", {"keys": "mod+s"}, "press_keys mod+s"),
+        ("open_app", {"name": "Notepad", "launch": True}, "open_app Notepad"),
+        ("type_text", {"text": "hello", "label": "Search"}, "type_text Search"),
+        ("type_text", {"text": "hello"}, "type_text"),
+        ("screen_read", {"filter": "save", "limit": 20}, "screen_read"),
+        ("read_file", {"path": "app.py", "start_line": 3}, "read_file app.py"),
+    ],
+)
+def test_every_tool_call_gets_an_identity(tool, arguments, head):
+    action = describe_call(tool, arguments)
+    assert action is not None
+    assert action.head == head
+
+
+def test_two_different_clicks_are_two_different_attempts(memory: Memory):
+    """The failure mode of a shared identity: clicking Cancel would "prove"
+    that the failed click on Save had been fixed."""
+    watcher = ErrorFixWatcher(memory)
+    save = describe_call("click", {"index": 1, "label": "Save"}, mutating=True)
+    cancel = describe_call("click", {"index": 2, "label": "Cancel"}, mutating=True)
+
+    watcher.observe(save, ok=False, output="element 1 is not enabled")
+    watcher.observe(cancel, ok=True)
+
+    assert watcher.captured == 0
+    assert watcher.outstanding == ["click Save"]
+
+
+def test_a_desktop_fix_is_captured(memory: Memory):
+    """The failure this whole change exists for: the click was aimed at the
+    wrong window, focusing the right one fixed it, and until now nothing in
+    Victor remembered that."""
+    watcher = ErrorFixWatcher(memory)
+    click = describe_call("click", {"index": 3, "label": "Save"}, mutating=True)
+    focus = describe_call("open_app", {"name": "Notepad"}, mutating=True)
+
+    assert watcher.observe(click, ok=False, output="no element at index 3") is None
+    assert watcher.observe(focus, ok=True) is None
+    note = watcher.observe(click, ok=True)
+
+    assert note is not None and "click Save" in note
+    best = memory.recall_for_error("no element at index 3").best
+    assert best.record.meta["fix"] == "open_app Notepad"
+    # Stored without a shell prompt: it was never a command, and a `$` in front
+    # of it invites the model to try running it.
+    assert not best.record.text.startswith("$")
+
+
+def test_re_reading_the_screen_is_not_a_fix(memory: Memory):
+    """screen_read and scroll are declared non-mutating, so they are the
+    desktop's version of `ls` - looking, not fixing."""
+    watcher = ErrorFixWatcher(memory)
+    click = describe_call("click", {"index": 3, "label": "Save"}, mutating=True)
+
+    watcher.observe(click, ok=False, output="stale index")
+    watcher.observe(describe_call("screen_read", {}, mutating=False), ok=True)
+    watcher.observe(describe_call("scroll", {"direction": "down"}, mutating=False), ok=True)
+    watcher.observe(click, ok=True)
+
+    assert watcher.captured == 0
+
+
+def test_a_read_only_git_subcommand_is_not_an_intervention(memory: Memory):
+    """`git push` fails, `git status` succeeds, `git push` works. Status did
+    nothing - the tool's own MUTATING set is what says so."""
+    watcher = ErrorFixWatcher(memory)
+    push = describe_call("git", {"subcommand": "push", "args": ["origin", "main"]})
+    status = describe_call("git", {"subcommand": "status"})
+
+    watcher.observe(push, ok=False, output="rejected: fetch first")
+    watcher.observe(status, ok=True)
+    watcher.observe(push, ok=True)
+
+    assert watcher.captured == 0
+
+
+def test_a_git_fix_is_captured(memory: Memory):
+    watcher = ErrorFixWatcher(memory)
+    push = describe_call("git", {"subcommand": "push", "args": ["origin", "main"]})
+    pull = describe_call("git", {"subcommand": "pull", "args": ["--rebase"]})
+
+    watcher.observe(push, ok=False, output="rejected: fetch first")
+    watcher.observe(pull, ok=True)
+    note = watcher.observe(push, ok=True)
+
+    assert note is not None
+    assert memory.recall_for_error("rejected: fetch first").best.record.meta["fix"] == (
+        "git pull --rebase"
+    )
+
+
+def test_an_unknown_tool_splits_rather_than_merges():
+    """A tool added later has no entry in the table. Splitting too finely
+    remembers nothing; merging too coarsely remembers the wrong fix."""
+    one = describe_call("future_tool", {"target": "a"})
+    two = describe_call("future_tool", {"target": "b"})
+
+    assert one.head != two.head
+    assert describe_call("future_tool", {"target": "a"}).head == one.head
+
+
 # --- summarising and chunking ---------------------------------------------
 
 
@@ -392,25 +506,82 @@ def test_an_indexed_file_can_be_recalled(tmp_path: Path, memory: Memory):
 # --- the agent's error path ------------------------------------------------
 
 
-def test_memory_never_breaks_a_run(memory: Memory):
-    """A corrupt store must degrade the run to "no recall", not fail it."""
+def _bare_agent(memory, settings, watcher=None, desktop=False):
+    """An Agent with only the parts ``_remember`` touches.
+
+    Built with ``__new__`` on purpose: the point is to exercise the memory hook
+    against a store that misbehaves, without a model, a provider or a run.
+    """
     from victor.agent.loop import Agent
+    from victor.tools import build_registry
+    from victor.tracing import Trace
+
+    agent = Agent.__new__(Agent)
+    agent.memory = memory
+    agent.watcher = watcher
+    agent.recalled = 0
+    agent.messages = []
+    agent.registry = build_registry(settings, desktop=desktop)
+    agent.trace = Trace.disabled()
+    return agent
+
+
+def test_memory_never_breaks_a_run(settings):
+    """A corrupt store must degrade the run to "no recall", not fail it."""
+    from victor.agent.llm import ToolCall
     from victor.tools.base import ToolResult
 
     class Exploding:
         def recall_for_error(self, error):
             raise RuntimeError("store is corrupt")
 
-    agent = Agent.__new__(Agent)
-    agent.memory = Exploding()
-    agent.watcher = None
-    agent.recalled = 0
-    from victor.tracing import Trace
-
-    agent.trace = Trace.disabled()
-
-    from victor.agent.llm import ToolCall
-
+    agent = _bare_agent(Exploding(), settings)
     call = ToolCall(id="1", name="shell", arguments={"command": "pytest"})
     agent._remember(call, ToolResult(ok=False, error="boom"))  # must not raise
+    assert agent.recalled == 0
+
+
+def test_a_failing_desktop_call_consults_memory(memory: Memory, settings):
+    """The gap this closes. `_remember` returned early for anything that was
+    not the shell, so a stored desktop fix could never be recalled - the agent
+    made the same mistake on Tuesday that it had solved on Monday."""
+    from victor.agent.llm import ToolCall
+    from victor.tools.base import ToolResult
+
+    memory.remember_fix(
+        error="click Save\nno element at index 3",
+        fix="open_app Notepad",
+        command="click Save",
+    )
+    agent = _bare_agent(memory, settings, desktop=True)
+
+    call = ToolCall(id="1", name="click", arguments={"index": 3, "label": "Save"})
+    agent._remember(call, ToolResult(ok=False, error="no element at index 3"))
+
+    assert agent.recalled == 1
+    assert "open_app Notepad" in agent.messages[-1]["content"]
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"decision": "deny"},  # the safety layer refused it
+        {"refused": "repeat"},  # the loop refused it as a repeat
+        {"refused": "terminal"},  # a desktop tool refused to type into a shell
+    ],
+)
+def test_a_call_that_never_ran_is_not_remembered(memory: Memory, settings, metadata):
+    """A block is not a failure. Recorded as one, the next success looks like
+    its fix, and the store fills with advice for problems nobody had."""
+    from victor.agent.llm import ToolCall
+    from victor.rag import ErrorFixWatcher
+    from victor.tools.base import ToolResult
+
+    watcher = ErrorFixWatcher(memory)
+    agent = _bare_agent(memory, settings, watcher=watcher)
+
+    call = ToolCall(id="1", name="shell", arguments={"command": "rm -rf /"})
+    agent._remember(call, ToolResult(ok=False, error="blocked", metadata=metadata))
+
+    assert watcher.outstanding == []
     assert agent.recalled == 0

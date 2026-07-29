@@ -701,7 +701,8 @@ because "Victor remembers" means two different things.
 ### Still outstanding
 
 - Recall is wired to the **shell** error path only. A failing `git` or desktop
-  action does not consult memory yet.
+  action does not consult memory yet. *(Closed after P8 — see [Memory beyond
+  the shell](#memory-beyond-the-shell-added-after-p8).)*
 - No run has gone through the model with memory in the loop, for the same
   reason as every other phase: there is still no API key. The injection point is
   tested; the model's use of what it is handed is not.
@@ -938,3 +939,66 @@ macOS also differs in two ways worth knowing operationally: Accessibility
 permission is explicit and must be granted in System Settings, and the literal
 frontmost process is sometimes a helper with no windows — hence `--app` to
 target an application by name, and `--apps` to list them.
+
+---
+
+## Memory beyond the shell *(added after P8)*
+
+P6 shipped with recall wired to the shell error path and nothing else, and I
+wrote that down as outstanding rather than describing it as finished. This
+closes it.
+
+The early return was one line — `if self.memory is None or call.name != "shell"`
+— but the reason it was there is not trivial. The watcher's whole rule depends
+on identity: *the same thing failed, and later succeeded, so what ran in
+between is the fix.* A command line has an obvious identity, `command_head`
+extracts it, and two runs of `pytest` are two attempts at the same thing.
+A click does not come with one.
+
+**Identity is the tool plus its target.** `describe_call` answers that for
+every tool: `click Save`, `git push`, `press_keys mod+s`, `open_app Notepad`.
+Getting the target argument right matters more than it looks — for a click it
+is the **label**, not the index, because the index shifts as the tree re-sorts
+while the button is still the same button. Choosing wrong here does not fail
+loudly; it merges two attempts into one, and then a successful click on Cancel
+"proves" that the failed click on Save was fixed. There is a test named after
+that failure.
+
+For a tool nobody has taught the function about, identity falls back to the
+whole argument list. That splits too finely, deliberately: an over-split
+identity remembers nothing, an over-merged one remembers the wrong fix and
+recalls it with confidence.
+
+**"Did this change anything" has the same shape as before.** P6 already learned
+this lesson once — `is_diagnostic` kept its own list of command names, called
+`printf 'x' > helper.py` diagnostic, and dropped the fix. The answer now comes
+from whoever knows best per call: `shell` asks the P3 classifier, `git` asks
+its own `MUTATING` set, and everything else uses the `mutating` flag its
+`ToolSpec` already declares. Nothing gets a second opinion invented for it.
+
+That mapping is what makes the desktop work at all. `screen_read` and `scroll`
+are declared non-mutating, so re-reading the screen after a failed click is
+recognised as looking around rather than fixing — the desktop's version of the
+`ls` problem, and it falls out of the existing declaration instead of needing a
+new rule.
+
+### A block is not a failure
+
+Extending the hook surfaced a defect that had been live on the shell path since
+P6. A call the safety layer denied, or one the loop refused as a repeat, comes
+back as `ok=False` — and the watcher recorded it as a failure. Nothing had run.
+The next success then looked like its fix, and the store would fill with advice
+for problems nobody had.
+
+Both are now marked in `metadata` (`decision` for a block, `refused` for a
+turned-away call — a convention the desktop tools already used for refusing to
+type into a terminal) and skipped. Four regression tests; all four fail against
+the previous code, which is how I know they test something.
+
+**713 tests**, up from 692.
+
+### Still outstanding
+
+- The same one as everything else: no run has gone through a live model with
+  memory in the loop. The injection point is tested; what a model does with a
+  recalled fix is not.

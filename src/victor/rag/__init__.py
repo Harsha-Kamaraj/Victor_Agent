@@ -20,9 +20,11 @@ from .embed import (
     select_embedder,
 )
 from .ingest import (
+    Action,
     ErrorFixWatcher,
     chunk_text,
     command_head,
+    describe_call,
     index_path,
     is_diagnostic,
     iter_files,
@@ -33,6 +35,7 @@ from .store import EmbedderChanged, Hit, Record, VectorStore, fingerprint
 
 __all__ = [
     "MODEL_NAME",
+    "Action",
     "Embedder",
     "EmbedderChanged",
     "EmbeddingUnavailable",
@@ -47,6 +50,7 @@ __all__ = [
     "build_memory",
     "chunk_text",
     "command_head",
+    "describe_call",
     "describe_embedder",
     "fingerprint",
     "index_path",

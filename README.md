@@ -2,7 +2,7 @@
 
 A voice-driven computer-use agent for **Windows and macOS** that runs entirely on free API tiers — because it reads the accessibility tree instead of guessing pixels.
 
-**Status: all eight phases complete.** 692 tests, and `victor doctor` reports what is genuinely unavailable on your machine rather than a green tick for something that does not work.
+**Status: all eight phases complete.** 713 tests, and `victor doctor` reports what is genuinely unavailable on your machine rather than a green tick for something that does not work.
 
 Two documents, deliberately separate: [docs/PLAN.md](docs/PLAN.md) is the plan of record — what was intended, why, and what was deliberately cut. [docs/BUILD-LOG.md](docs/BUILD-LOG.md) is what actually happened, including the decisions that changed during implementation and the measured numbers.
 
@@ -134,7 +134,7 @@ Stated upfront rather than discovered later. This section is longer than most pr
 - **Actuation is verified on both, at different depths.** macOS is verified end to end, including a two-task GUI run. Windows has had one smoke test against File Explorer: perception and a real click through UI Automation's Invoke both worked, and it found four defects — all now fixed, with regression tests. See the [build log](docs/BUILD-LOG.md#p5--desktop-actuation-) for what has and has not been exercised there.
 - **A locked screen looks like an empty one.** Both platforms stop reporting window geometry when locked, so Victor checks and says so rather than reporting a window with no controls.
 - **Memory is semantic only with the extra installed.** `pip install -e '.[memory]'` pulls a ~130 MB ONNX model that matches paraphrases. Without it, recall falls back to a hashed bag of words that finds a traceback it has seen almost verbatim and nothing more. `victor doctor` reports which one is live, because "Victor remembers" means two different things.
-- **Memory watches the shell only.** A failing `git` or desktop action does not consult it yet.
+- **Memory has never seen a live model.** Capture and recall are wired to every tool and tested, but what a model does with a fix handed back to it is untested, for the same reason as everything above.
 - **Free-tier numbers are declared, not discovered.** Providers change allowances without notice. The routing table in [src/victor/providers/registry.py](src/victor/providers/registry.py) states them conservatively, so Victor under-uses a generous tier rather than hitting a 429 mid-demo.
 - **Scout is a heuristic and says so on every run.** GitHub has no trending API, stars measure attention rather than quality, and the comparison set is seeded from your own topics — so it finds gaps adjacent to what you already do, not a view of the industry. Corpus results skew toward tutorials and awesome-lists, which outstar production code.
 - **The status strip polls; it does not stream.** It reads the ledger and the newest trace four times a second. A task that starts and finishes between two polls will not appear.
@@ -254,7 +254,7 @@ Developing on macOS is supported for everything including P4/P5; Linux for every
 
 ## Remembering what it already worked out
 
-Nobody curates a knowledge base of their own mistakes, so Victor builds one by watching. When a shell command fails and the *same command* later succeeds, whatever ran in between is stored as the fix:
+Nobody curates a knowledge base of their own mistakes, so Victor builds one by watching. When something fails and the *same thing* later succeeds, whatever ran in between is stored as the fix:
 
 ```console
 $ python3 app.py                     ok=False  ModuleNotFoundError: No module named 'helper'
@@ -266,6 +266,19 @@ $ python3 app.py                     ok=True   → remembered how python3 was fi
 Hit the same error again in a later session and the fix comes back — in **2.5 ms**, from a local ONNX model and a SQLite file, with **zero API calls** and no quota spent. `victor recall "<anything>"` searches it by hand, and `victor index <path>` adds project files.
 
 "A later command succeeded" would have been the easier rule and a worse one: `pytest` fails, `ls` succeeds, and *"the fix is ls"* gets recalled confidently next time. Requiring the failing command itself to recover makes the pair verifiable rather than inferred — and when it never recovers, nothing is stored, because nothing has been learned.
+
+This is not only about the shell. The desktop fails in the most repetitive ways of anything here, so the same rule covers it:
+
+```console
+click Save          ok=False  no element at index 3
+screen_read         ok=True   ← ignored, this is looking around
+open_app Notepad    ok=True   ← recorded as the intervention
+click Save          ok=True   → remembered how click Save was fixed
+```
+
+The identity is the tool plus its **target** — `click Save`, not `click`, and the label rather than the index, because the index moves as a list re-sorts while the button stays the same button. Sharing an identity across two controls would let a successful click on Cancel "prove" that the failed click on Save had been fixed.
+
+Whether something counts as a fix rather than a look is never guessed twice: `shell` asks the safety classifier, `git` asks its own list of mutating subcommands, and every other tool uses the flag its own definition already declares. And a call the safety layer blocked is not recorded as a failure at all — nothing ran, so nothing can be its fix.
 
 Recall stays quiet below a relevance floor. A vector store always returns its nearest neighbour, and nearest is not relevant; an injected wrong memory is worse than none, because it arrives as prior experience and gets treated as evidence.
 

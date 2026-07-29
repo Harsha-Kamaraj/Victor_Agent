@@ -8,8 +8,8 @@ store them. Useful, unremarkable.
 :class:`ErrorFixWatcher` is the plan's "auto-capture hook", and it is what makes
 this a memory rather than a search box. Nobody curates a knowledge base of their
 own mistakes; if remembering a fix requires deciding to remember it, the store
-stays empty. So the agent watches its own shell traffic and works out what
-counts as a fix.
+stays empty. So the agent watches its own traffic and works out what counts as
+a fix.
 
 **What counts as a fix, and why not the obvious thing.** The plan says: when a
 command exits non-zero and a later one succeeds, store the pair. Taken
@@ -22,12 +22,21 @@ failed, and then later succeeded.** Whatever ran in between is the fix. That is
 the shape of every real debugging session, it is verifiable rather than
 inferred, and when it never happens - the command is still broken - nothing is
 stored, which is correct.
+
+**Why this is not only about the shell.** The watcher started out reading shell
+traffic alone, because a command line is a thing with an obvious identity: two
+runs of ``pytest`` are two attempts at the same thing. But the failures this
+agent actually hits on a desktop have the same shape - a click lands on the
+wrong window, ``open_app`` brings the right one forward, the click then works -
+and none of that was being remembered. :func:`describe_call` supplies the
+missing piece, an identity and an is-this-an-intervention answer for any tool
+call, so the same proven signal covers ``git`` and the desktop too.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -200,6 +209,102 @@ def is_diagnostic(command: str) -> bool:
         return False
 
 
+#: The argument that says what a call was aimed at, per tool, best first.
+#:
+#: Identity is the tool plus its target. Two clicks on different buttons are two
+#: different attempts, and a success on one must not be taken as proof that the
+#: other was fixed - which is exactly what would happen if every click shared
+#: the identity "click".
+TARGET_ARGUMENTS: dict[str, tuple[str, ...]] = {
+    "screen_read": (),  # no target: reading the screen is one thing
+    "click": ("label", "index"),
+    "type_text": ("label", "into"),
+    "press_keys": ("keys",),
+    "scroll": ("direction",),
+    "find_on_screen": ("description",),
+    "open_app": ("name",),
+    "read_file": ("path",),
+}
+
+MAX_TARGET_CHARS = 60
+"""Labels can be a whole paragraph of button text. Identity only needs enough
+of one to tell two controls apart."""
+
+
+@dataclass(frozen=True, slots=True)
+class Action:
+    """One tool call, in the three terms memory needs.
+
+    ``head`` is identity: two calls sharing a head are two attempts at the same
+    thing, so a success closes an earlier failure. ``line`` is how the call
+    reads back to a person and to the model. ``changes`` says whether the call
+    acted on the world, which is what separates a fix from looking around.
+    """
+
+    head: str
+    line: str
+    changes: bool
+    shell: bool = False
+    """Whether this really was a command line. Only those get a ``$`` when they
+    are written back out; a click never was one, and dressing it up as one
+    would invite the model to try running it."""
+
+    @property
+    def display(self) -> str:
+        return f"$ {self.line}" if self.shell else self.line
+
+
+def _short(value: Any, limit: int = MAX_TARGET_CHARS) -> str:
+    text = " ".join(str(value).split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def describe_call(
+    tool: str, arguments: Mapping[str, Any], *, mutating: bool | None = None
+) -> Action | None:
+    """Turn a tool call into the terms memory works in, or ``None`` to ignore it.
+
+    ``mutating`` is the tool's own declaration from its :class:`ToolSpec`, and
+    it is the default answer to "did this change anything". Two tools override
+    it, because the spec flag is a statement about the tool's *capability* while
+    memory needs the truth about *this call*: ``shell`` is declared mutating
+    because any command might write, and ``git`` because some subcommands do.
+    Both know how to answer per call, so both are asked.
+    """
+    if tool == "shell":
+        command = str(arguments.get("command", "")).strip()
+        head = command_head(command)
+        if not head:
+            return None
+        return Action(head, command, changes=not is_diagnostic(command), shell=True)
+
+    if tool == "git":
+        from ..tools.git import MUTATING
+
+        sub = str(arguments.get("subcommand", "")).strip()
+        if not sub:
+            return None
+        args = [str(a) for a in (arguments.get("args") or [])]
+        line = " ".join(["git", sub, *args])
+        return Action(f"git {sub}", _short(line, 120), changes=sub in MUTATING, shell=True)
+
+    if tool in TARGET_ARGUMENTS:
+        for name in TARGET_ARGUMENTS[tool]:
+            value = arguments.get(name)
+            if value not in (None, ""):
+                target = f"{tool} {_short(value)}"
+                return Action(target, target, changes=bool(mutating))
+        return Action(tool, tool, changes=bool(mutating))
+
+    # A tool nobody taught this function about. Identity falls back to the whole
+    # argument list, which splits too finely rather than too coarsely: an
+    # over-split identity remembers nothing, an over-merged one remembers the
+    # wrong fix and recalls it with confidence.
+    rendered = " ".join(f"{k}={_short(v, 30)}" for k, v in sorted(arguments.items()))
+    line = f"{tool} {rendered}".strip()
+    return Action(line, line, changes=bool(mutating))
+
+
 _NOISE = re.compile(r"^\s*(File \"|\s+at |\s{4,})")
 
 
@@ -225,18 +330,18 @@ def summarise_error(text: str, limit: int = MAX_ERROR_CHARS) -> str:
 
 @dataclass
 class Attempt:
-    """A command that failed, and what has been tried since."""
+    """An action that failed, and what has been tried since."""
 
-    command: str
+    action: Action
     error: str
     interventions: list[str] = field(default_factory=list)
 
 
 class ErrorFixWatcher:
-    """Watches shell traffic and stores ``(error -> fix)`` when one is proven.
+    """Watches the agent's actions and stores ``(error -> fix)`` when one is proven.
 
-    Feed it every shell result. It stays silent until the same command that
-    failed later succeeds, and then it knows both halves of the pair.
+    Feed it every tool result. It stays silent until the same action that failed
+    later succeeds, and then it knows both halves of the pair.
     """
 
     def __init__(self, memory: Any, *, max_interventions: int = 8) -> None:
@@ -245,10 +350,14 @@ class ErrorFixWatcher:
         self._failed: dict[str, Attempt] = {}
         self.captured = 0
 
-    def observe(self, command: str, *, ok: bool, output: str = "") -> str | None:
-        """Record one shell result. Returns a note when a fix was captured."""
-        head = command_head(command)
-        if not head:
+    def observe(self, action: str | Action, *, ok: bool, output: str = "") -> str | None:
+        """Record one result. Returns a note when a fix was captured.
+
+        A plain string is read as a shell command, which is what the shell path
+        and most of the tests pass.
+        """
+        act = action if isinstance(action, Action) else describe_call("shell", {"command": action})
+        if act is None or not act.head:
             return None
 
         if not ok:
@@ -256,18 +365,18 @@ class ErrorFixWatcher:
             if error:
                 # A repeat failure keeps the interventions tried so far: the
                 # user is still working on this one.
-                existing = self._failed.get(head)
+                existing = self._failed.get(act.head)
                 if existing is None:
-                    self._failed[head] = Attempt(command=command, error=error)
+                    self._failed[act.head] = Attempt(action=act, error=error)
                 else:
                     existing.error = error
             return None
 
-        attempt = self._failed.pop(head, None)
+        attempt = self._failed.pop(act.head, None)
         if attempt is None:
             # A success for something that never failed. It might still be the
             # fix for something else that is outstanding, so record it there.
-            self._note_intervention(command)
+            self._note_intervention(act)
             return None
 
         if not attempt.interventions:
@@ -278,27 +387,27 @@ class ErrorFixWatcher:
 
         return self._store(attempt)
 
-    def _note_intervention(self, command: str) -> None:
-        if is_diagnostic(command):
+    def _note_intervention(self, action: Action) -> None:
+        if not action.changes:
             return  # looking around is not fixing
         for attempt in self._failed.values():
             if len(attempt.interventions) < self.max_interventions:
-                attempt.interventions.append(command.strip())
+                attempt.interventions.append(action.line)
 
     def _store(self, attempt: Attempt) -> str | None:
         fix = "\n".join(attempt.interventions)
-        text = f"$ {attempt.command}\n{attempt.error}"
+        text = f"{attempt.action.display}\n{attempt.error}"
         record = self.memory.remember_fix(
             error=text,
             fix=fix,
-            command=attempt.command,
+            command=attempt.action.line,
         )
         if record is None:
             return None
         self.captured += 1
-        return f"remembered how {command_head(attempt.command)} was fixed"
+        return f"remembered how {attempt.action.head} was fixed"
 
     @property
     def outstanding(self) -> list[str]:
-        """Commands that have failed and not yet been seen to succeed."""
+        """Actions that have failed and not yet been seen to succeed."""
         return sorted(self._failed)

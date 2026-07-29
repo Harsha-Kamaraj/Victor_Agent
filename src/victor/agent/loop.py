@@ -291,6 +291,10 @@ class Agent:
                         "you already made this exact call and got the result above. "
                         "Try something different, or answer with what you know."
                     ),
+                    # Marked so memory can tell "this failed" from "this never
+                    # ran". Recording a refusal as a failure would make the next
+                    # success look like a fix for it.
+                    metadata={"refused": "repeat"},
                 )
             else:
                 with self.trace.span("tool.run", tool=call.name, arguments=call.arguments) as sp:
@@ -315,26 +319,45 @@ class Agent:
     def _remember(self, call: ToolCall, result: ToolResult) -> None:
         """Feed the result to memory, and inject a past fix if there is one.
 
-        Both halves hang off the same place because they are the same event: a
-        command failed. One half asks whether this has been seen before, the
+        Both halves hang off the same place because they are the same event: an
+        action failed. One half asks whether this has been seen before, the
         other starts watching for what resolves it.
+
+        This used to run only for the shell, which left the desktop - the part
+        of the agent that fails in the most repetitive ways - learning nothing
+        from a session to the next. :func:`describe_call` gives every tool an
+        identity, so the rule is now simply "whatever ran".
 
         Deliberately never raises. Memory is an optimisation - a corrupt store
         or a missing model must degrade the run to "no recall", never fail it.
         """
-        if self.memory is None or call.name != "shell":
+        if self.memory is None:
             return
-        command = str(call.arguments.get("command", ""))
-        if not command:
+        if result.metadata.get("decision") or result.metadata.get("refused"):
+            # Blocked by the safety layer, refused as a repeat, or turned away
+            # by a tool before it acted. Nothing ran, so there is no failure to
+            # remember and nothing a later success could be the fix for.
             return
 
         try:
+            from ..rag.ingest import describe_call
+
+            if call.name not in self.registry:
+                return  # a name the model invented; the call never happened
+            action = describe_call(
+                call.name,
+                call.arguments,
+                mutating=self.registry.get(call.name).spec.mutating,
+            )
+            if action is None:
+                return
+
             if self.watcher is not None:
                 note = self.watcher.observe(
-                    command, ok=result.ok, output=result.for_model()
+                    action, ok=result.ok, output=result.for_model()
                 )
                 if note:
-                    self.trace.event("memory.capture", command=command, note=note)
+                    self.trace.event("memory.capture", action=action.line, note=note)
 
             if result.ok:
                 return
@@ -351,7 +374,7 @@ class Agent:
             self.messages.append({"role": "user", "content": recollection.for_model()})
             self.trace.event(
                 "memory.recalled",
-                command=command,
+                action=action.line,
                 score=round(recollection.best.score, 3) if recollection.best else 0.0,
                 cost=0,
             )
