@@ -1053,3 +1053,71 @@ for both branches while only the detail string varied. A contradiction inside a
 single line is the fastest way to teach someone to stop reading the output, and
 it was reporting a key the user had just gone and fetched as though it had been
 ignored. Both branches now pick their own status, with a test for each.
+
+---
+
+## Running the paths that had never been run *(added after P8)*
+
+With keys in place, the remaining unverified paths were worth walking one at a
+time. Voice went first and cost nothing but a download; vision produced three
+defects, none of which any test could have found.
+
+### Voice, measured live
+
+`victor voice install` fetched the Piper voice (63 MB), `victor say` spoke
+through real speakers, and `victor bench --voice --stt` finally put a number on
+the leg that had been marked "not measured yet" since P1:
+
+```
+stt round trip                            3      245.6      532.9  ms
+```
+
+That is Groq Whisper over the network, five runs, and it is the last figure the
+README was carrying as an estimate. The full voice → voice loop still needs a
+person to speak into a microphone, so it stays unmeasured and stays declared.
+
+`victor doctor` also went from 2 warnings to 0 under a real terminal. One was
+the missing voice; the other was "no terminal to ask on", which turned out to
+be an artefact of running the check from a non-TTY shell rather than a fault -
+worth confirming rather than assuming, since a confirmation prompt that cannot
+be shown is exactly the failure that would make the safety layer useless.
+
+### Vision was broken three ways
+
+**`mss` cannot start on macOS 26.** It parses the OS version with
+`float(platform.mac_ver()[0])`, and `mac_ver()` returns `''` there, so it raises
+`ValueError: could not convert string to float: ''` before taking a frame. The
+capture layer now prefers Quartz on macOS, which is already a dependency for
+the accessibility tree and for synthesising events. A portable library that
+breaks on a new OS release is no longer on the critical path.
+
+**The region convention disagreed with itself.** `find_on_screen` passed the
+window rectangle as `(left, top, width, height)`; the grabber unpacked it as
+`(left, top, right, bottom)` and derived width by subtraction. Every windowed
+capture was therefore the wrong size, and any window not at the origin would
+have been captured from the wrong place entirely. It survived this long because
+no test ever captured a region and the backend was too broken to run. One
+convention now, written down, with a test at both layers.
+
+**A blank screen was going to be sent to the model.** Without screen recording
+permission macOS does not raise and does not return nil - it hands back a
+perfectly valid image of nothing. That would have been downscaled, hashed and
+uploaded, spending one of ~250 daily vision requests to ask which button is on
+a black rectangle. Captures are now checked for uniformity and refused with the
+System Settings path in the message.
+
+Worth noting how this was found: `CGPreflightScreenCaptureAccess()` returned
+**True** while every capture came back blank, and macOS's own `screencapture`
+CLI failed with "could not create image from rect". The permission API agreed
+the permission was granted; the screen disagreed. Only looking at the pixels
+told the truth, which is why the check is on the image rather than on the API.
+
+### And `doctor` was reporting a green tick for it
+
+`ScreenCapture.available()` answered "is `mss` importable" - a different
+question from "can this machine take a screenshot", and it answered yes on a
+machine where capture was completely broken. It now takes one. That is the
+exact failure the README's opening claim is about, sitting inside the tool
+whose job is to catch it.
+
+**719 tests.**

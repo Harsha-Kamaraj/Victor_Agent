@@ -433,6 +433,93 @@ def test_a_changed_screen_is_captured_again() -> None:
     assert is_new
 
 
+def test_a_region_is_left_top_width_height() -> None:
+    """The two ends of this disagreed. `find_on_screen` passed the window's
+    (left, top, width, height) and the grabber unpacked it as
+    (left, top, right, bottom), so every windowed capture was the wrong size -
+    and off-screen entirely for any window not at the origin. Nothing caught it
+    because no test captured a region."""
+    from victor.desktop import ScreenCapture
+
+    seen: list = []
+
+    def grabber(region):
+        seen.append(region)
+        return make_image((7, 7, 7))
+
+    ScreenCapture(grabber=grabber).capture((300, 100, 800, 600))
+    assert seen == [(300, 100, 800, 600)]
+
+
+def test_mss_is_asked_for_the_width_it_was_given(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same bug, one layer down: the monitor dict must describe the
+    rectangle that was asked for, not one derived by subtracting from it."""
+    pytest.importorskip("PIL")
+    from victor.desktop import capture as capture_module
+
+    asked: dict = {}
+
+    class FakeShot:
+        size = (800, 600)
+        bgra = bytes(800 * 600 * 4)
+
+    class FakeMss:
+        monitors = [{"left": 0, "top": 0, "width": 1920, "height": 1080}]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def grab(self, monitor):
+            asked.update(monitor)
+            return FakeShot()
+
+    monkeypatch.setitem(
+        __import__("sys").modules, "mss", type("m", (), {"mss": lambda: FakeMss()})
+    )
+    capture_module._grab_mss((300, 100, 800, 600))
+
+    assert asked == {"left": 300, "top": 100, "width": 800, "height": 600}
+
+
+def test_a_uniform_image_is_recognised_as_blank() -> None:
+    """macOS does not refuse a capture without screen recording permission - it
+    returns a valid image of nothing. Sent on, that spends one of ~250 daily
+    vision requests asking which button is on a black rectangle."""
+    pytest.importorskip("PIL")
+    from victor.desktop.capture import _is_blank
+
+    assert _is_blank(make_image((0, 0, 0)))
+    assert _is_blank(make_image((255, 255, 255)))
+
+    from PIL import Image, ImageDraw
+
+    real = Image.new("RGB", (100, 100), (250, 250, 250))
+    ImageDraw.Draw(real).rectangle([10, 10, 50, 50], fill=(10, 10, 10))
+    assert not _is_blank(real)
+
+
+def test_availability_tries_a_capture_rather_than_an_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """It reported "screen capture ready" on a machine where every backend
+    failed, because it only asked whether mss could be imported."""
+    from victor.desktop import ScreenCapture
+    from victor.desktop import capture as capture_module
+
+    def explode(region):
+        raise capture_module.CaptureUnavailable("the screen came back blank")
+
+    monkeypatch.setattr(capture_module, "_quartz", lambda: None)
+    monkeypatch.setattr(capture_module, "_grab_mss", explode)
+
+    ok, detail = ScreenCapture.available()
+    assert not ok
+    assert "blank" in detail
+
+
 def test_force_bypasses_the_cache() -> None:
     from victor.desktop import ScreenCapture
 

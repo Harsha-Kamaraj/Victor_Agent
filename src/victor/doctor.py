@@ -371,16 +371,24 @@ def _check_perception(settings: Settings) -> Iterator[Check]:
     )
 
     capture_ok, capture_detail = ScreenCapture.available()
-    yield (
-        Check("screen capture", Status.OK, capture_detail)
-        if capture_ok
-        else Check(
+    if capture_ok:
+        yield Check("screen capture", Status.OK, capture_detail)
+    else:
+        # WARN rather than SKIP when the machinery is installed but cannot take
+        # a picture: a missing library is a smaller install, whereas a capture
+        # that comes back blank is something the user has to go and fix, and
+        # `find_on_screen` will spend a scarce vision request discovering it.
+        missing = "not installed" in capture_detail
+        yield Check(
             "screen capture",
-            Status.SKIP,
+            Status.SKIP if missing else Status.WARN,
             capture_detail,
-            hint="pip install -e '.[desktop]'",
+            hint=(
+                "pip install -e '.[desktop]'"
+                if missing
+                else "vision falls back to this; screen_read does not need it."
+            ),
         )
-    )
 
     if settings.has("gemini_api_key"):
         yield Check("vision fallback", Status.OK, "gemini, falling back to groq")
