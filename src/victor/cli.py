@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import platform
 import sys
 from pathlib import Path
@@ -1087,6 +1088,191 @@ def press(
         err_console.print(f"[red]{outcome.error}[/red]")
         raise typer.Exit(1)
     console.print(f"[green]{outcome.output}[/green]")
+
+
+# --- memory ---------------------------------------------------------------
+
+
+def _warm_embedder(memory) -> None:
+    """Load the embedding model now, announcing a first-run download."""
+    warm = getattr(memory.embedder, "warm", None)
+    if warm is None:
+        return
+    cached = any(memory.store.directory.parent.glob("models/**/*.onnx"))
+    if not cached:
+        console.print(
+            "[dim]first run: downloading the embedding model (~130 MB, once). "
+            "It stays local and nothing is sent anywhere.[/dim]"
+        )
+    warm()
+
+
+def _open_memory():
+    """Victor's memory, or a printed reason and a non-zero exit."""
+    from .rag import build_memory
+    from .rag.store import EmbedderChanged
+
+    try:
+        return build_memory(_settings())
+    except EmbedderChanged as exc:
+        err_console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(6) from exc
+
+
+@app.command(name="index")
+def index_command(
+    path: Annotated[
+        Path | None, typer.Argument(help="File or directory to index. Defaults to the cwd.")
+    ] = None,
+    rebuild: Annotated[
+        bool,
+        typer.Option("--rebuild", help="Re-encode everything with the current embedder."),
+    ] = False,
+) -> None:
+    """Read project files into memory. Local, and costs no quota."""
+    from .rag import build_memory, index_path, select_embedder
+    from .rag.store import EmbedderChanged, VectorStore
+
+    settings = _settings()
+    paths = settings.paths.ensure()
+
+    if rebuild:
+        embedder = select_embedder(paths.models_dir)
+        # Open against whatever the store already declares, so the guard does
+        # not fire on the very command that exists to clear it.
+        with sqlite_embedder(paths.memory_dir) as (name, dimensions):
+            store = VectorStore(paths.memory_dir, embedder_name=name, dimensions=dimensions)
+        from .rag.recall import Memory
+
+        memory = Memory(store, embedder)
+        with console.status(f"re-encoding with {embedder.name}..."):
+            count = memory.rebuild(embedder)
+        console.print(f"[green]re-encoded {count} records[/green] with {embedder.name}")
+        console.print(f"[dim]{memory.describe()}[/dim]")
+        return
+
+    try:
+        memory = build_memory(settings)
+    except EmbedderChanged as exc:
+        err_console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(6) from exc
+
+    root = Path(path or Path.cwd())
+    if not root.exists():
+        err_console.print(f"[yellow]{root} does not exist[/yellow]")
+        raise typer.Exit(2)
+
+    # Warm the embedder before the spinner starts. The first run downloads a
+    # ~130 MB ONNX model, and its progress bar fighting a status spinner looks
+    # like a hang - which is exactly when a user needs to see progress most.
+    _warm_embedder(memory)
+
+    seen: list[Path] = []
+    with console.status(f"indexing {root}..."):
+        files, stored = index_path(memory, root, on_file=seen.append)
+
+    console.print(f"[green]{files} files read, {stored} new chunks stored[/green]")
+    if files and not stored:
+        console.print("[dim]nothing new - every chunk was already known[/dim]")
+    console.print(f"[dim]{memory.describe()} - 0 API calls, 0 quota spent[/dim]")
+
+
+@app.command()
+def recall(
+    query: Annotated[str, typer.Argument(help="What to look for.")],
+    limit: Annotated[int, typer.Option("--limit", "-n", help="How many to show.")] = 5,
+    kind: Annotated[
+        str | None, typer.Option("--kind", help="Restrict to 'fix', 'file' or 'note'.")
+    ] = None,
+    all_scores: Annotated[
+        bool,
+        typer.Option("--all", help="Show near misses below the relevance floor too."),
+    ] = False,
+) -> None:
+    """Search memory. Offline, instant, and free."""
+    import time
+
+    memory = _open_memory()
+    started = time.perf_counter()
+    found = memory.recall(query, k=limit, kind=kind, threshold=0.0 if all_scores else None)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+
+    if not found.found:
+        console.print("[dim]nothing above the relevance floor[/dim]")
+        console.print(
+            f"[dim]{len(memory.store)} records searched in {elapsed_ms:.0f}ms. "
+            "Try --all to see near misses.[/dim]"
+        )
+        return
+
+    for hit in found.hits:
+        marker = "[green]" if hit.score >= memory.threshold else "[dim]"
+        console.print(f"{marker}{hit.score:.2f}[/] {hit.record.kind:<5} {hit.record.summary}")
+        fix = str(hit.record.meta.get("fix", "")).strip()
+        if fix:
+            for line in fix.splitlines():
+                console.print(f"      [cyan]{line}[/cyan]")
+        elif hit.record.source:
+            console.print(f"      [dim]{hit.record.source}[/dim]")
+
+    console.print(
+        f"\n[dim]{len(found.hits)} of {len(memory.store)} records in {elapsed_ms:.0f}ms "
+        "- 0 API calls, 0 quota spent[/dim]"
+    )
+
+
+@app.command(name="memory")
+def memory_command(
+    clear: Annotated[
+        bool, typer.Option("--clear", help="Forget everything. Cannot be undone.")
+    ] = False,
+    limit: Annotated[int, typer.Option("--limit", "-n", help="Recent records to list.")] = 10,
+) -> None:
+    """What Victor remembers."""
+    memory = _open_memory()
+
+    if clear:
+        count = len(memory.store)
+        if not typer.confirm(f"Forget all {count} records?"):
+            console.print("[dim]left alone[/dim]")
+            return
+        memory.store.clear()
+        console.print(f"[green]forgot {count} records[/green]")
+        return
+
+    console.print(memory.describe())
+    if not len(memory.store):
+        console.print(
+            "\n[dim]nothing remembered yet. Memory fills itself: when a command "
+            "fails and you later make it pass, the pair is stored. "
+            "`victor index` adds project files too.[/dim]"
+        )
+        return
+
+    table = Table(title="most recent", title_justify="left")
+    table.add_column("kind")
+    table.add_column("what", overflow="fold")
+    table.add_column("when", style="dim")
+    for record in memory.store.recent(limit):
+        table.add_row(record.kind, record.summary, record.created)
+    console.print(table)
+
+
+@contextlib.contextmanager
+def sqlite_embedder(directory: Path):
+    """Read back which embedder a store was built with, without opening it."""
+    import sqlite3
+
+    db = directory / "memory.sqlite3"
+    if not db.exists():
+        yield ("hash", 512)
+        return
+    connection = sqlite3.connect(db)
+    try:
+        rows = dict(connection.execute("SELECT key, value FROM store_meta").fetchall())
+        yield (rows.get("embedder", "hash"), int(rows.get("dimensions", 512)))
+    finally:
+        connection.close()
 
 
 @app.command()

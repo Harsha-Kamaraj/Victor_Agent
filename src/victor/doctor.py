@@ -19,6 +19,7 @@ from importlib.util import find_spec
 import httpx
 
 from .config import Settings
+from .errors import VictorError
 from .providers.registry import all_specs
 from .quota import QuotaLedger
 
@@ -377,9 +378,47 @@ def _check_perception(settings: Settings) -> Iterator[Check]:
         yield Check("vision fallback", Status.FAIL, "no key for any vision model")
 
 
+def _check_memory(settings: Settings) -> Iterator[Check]:
+    """Whether recall will work, and how well.
+
+    The distinction that matters is semantic versus lexical: without fastembed
+    Victor still remembers, but only recognises a traceback it has seen almost
+    verbatim. That is a warning rather than a failure - a degraded memory is
+    still a memory - and saying which one is live keeps the claim honest.
+    """
+    if not settings.memory_enabled:
+        yield Check("memory", Status.SKIP, "disabled (VICTOR_MEMORY=0)")
+        return
+
+    from .rag import build_memory, describe_embedder
+    from .rag.store import EmbedderChanged
+
+    try:
+        memory = build_memory(settings)
+    except EmbedderChanged as exc:
+        yield Check("memory", Status.FAIL, str(exc), hint="victor index --rebuild")
+        return
+    except VictorError as exc:
+        yield Check("memory", Status.FAIL, str(exc))
+        return
+
+    try:
+        semantic = memory.embedder.name == "fastembed"
+        yield Check(
+            "memory",
+            Status.OK if semantic else Status.WARN,
+            f"{len(memory.store)} records, {describe_embedder(memory.embedder)}",
+            hint="" if semantic else "pip install -e '.[memory]'",
+        )
+        yield Check("memory index", Status.OK, f"{memory.store.backend}, local, no quota")
+    finally:
+        memory.close()
+
+
 def _check_pending() -> Iterator[Check]:
     """Capabilities the README promises that later phases will deliver."""
-    yield Check("memory index", Status.PENDING, "P6 not implemented")
+    yield Check("scout", Status.PENDING, "P7 not implemented")
+    yield Check("status HUD", Status.PENDING, "P8 not implemented")
 
 
 def _check_tooling() -> Iterator[Check]:
@@ -402,6 +441,7 @@ def run_checks(settings: Settings, *, network: bool = True) -> list[Check]:
     checks += list(_check_agent(settings))
     checks += list(_check_safety(settings))
     checks += list(_check_perception(settings))
+    checks += list(_check_memory(settings))
     if network:
         checks += list(_check_network(settings))
     else:

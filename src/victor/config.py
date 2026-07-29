@@ -55,6 +55,13 @@ class Settings(BaseSettings):
     strict_free_tier: bool = Field(
         default=True, validation_alias=_env("VICTOR_STRICT_FREE_TIER")
     )
+    #: Whether the agent remembers errors and recalls past fixes.
+    #:
+    #: On by default, unlike desktop control: memory reads and writes only
+    #: inside Victor's own data directory, costs no quota, and the thing it
+    #: changes is that the agent stops repeating work.
+    memory_enabled: bool = Field(default=True, validation_alias=_env("VICTOR_MEMORY"))
+
     #: Whether the agent may drive the mouse and keyboard.
     #:
     #: Off by default, and deliberately so. Every other tool acts inside a

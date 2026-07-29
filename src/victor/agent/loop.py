@@ -141,6 +141,7 @@ class Agent:
         voice: bool = False,
         on_step: Callable[[Step], None] | None = None,
         kill_switch: Any | None = None,
+        memory: Any | None = None,
     ) -> None:
         self.settings = settings
         self.client = client
@@ -152,7 +153,15 @@ class Agent:
         self.voice = voice
         self.on_step = on_step
         self.kill_switch = kill_switch
+        self.memory = memory
+        self.watcher = None
+        if memory is not None:
+            from ..rag.ingest import ErrorFixWatcher
+
+            self.watcher = ErrorFixWatcher(memory)
         self.messages: list[dict[str, Any]] = []
+        self.recalled = 0
+        """How many times memory had something useful to say this run."""
 
     # -- conversation ------------------------------------------------------
 
@@ -299,8 +308,55 @@ class Agent:
                 }
             )
             executed.append((call, result))
+            self._remember(call, result)
 
         return executed
+
+    def _remember(self, call: ToolCall, result: ToolResult) -> None:
+        """Feed the result to memory, and inject a past fix if there is one.
+
+        Both halves hang off the same place because they are the same event: a
+        command failed. One half asks whether this has been seen before, the
+        other starts watching for what resolves it.
+
+        Deliberately never raises. Memory is an optimisation - a corrupt store
+        or a missing model must degrade the run to "no recall", never fail it.
+        """
+        if self.memory is None or call.name != "shell":
+            return
+        command = str(call.arguments.get("command", ""))
+        if not command:
+            return
+
+        try:
+            if self.watcher is not None:
+                note = self.watcher.observe(
+                    command, ok=result.ok, output=result.for_model()
+                )
+                if note:
+                    self.trace.event("memory.capture", command=command, note=note)
+
+            if result.ok:
+                return
+
+            recollection = self.memory.recall_for_error(result.for_model())
+            if not recollection.found:
+                return
+
+            self.recalled += 1
+            # Injected as a user turn rather than a system one: the system
+            # prompt is the agent's standing instructions, and a note about one
+            # error is not that. It also keeps the recall next to the failure
+            # it refers to, instead of thousands of tokens earlier.
+            self.messages.append({"role": "user", "content": recollection.for_model()})
+            self.trace.event(
+                "memory.recalled",
+                command=command,
+                score=round(recollection.best.score, 3) if recollection.best else 0.0,
+                cost=0,
+            )
+        except Exception as exc:  # noqa: BLE001 - memory must never break a run
+            self.trace.event("memory.error", detail=f"{type(exc).__name__}: {exc}")
 
     def close(self) -> None:
         self.client.close()
@@ -318,6 +374,7 @@ def build_agent(
     confirmer: Any | None = None,
     desktop: bool | None = None,
     app: str | None = None,
+    memory: Any | None = None,
 ) -> Agent:
     """Wire an agent with the standard router, tools, client and safety layer."""
     from ..safety import (
@@ -368,6 +425,18 @@ def build_agent(
             vision=vision,
         )
 
+    if memory is None and settings.memory_enabled:
+        from ..rag import build_memory
+
+        try:
+            memory = build_memory(settings, trace=trace)
+        except VictorError as exc:
+            # A memory that will not open is a reason to run without one, not a
+            # reason not to run. The commonest cause is a store built with a
+            # different embedder, and it says how to fix itself.
+            trace.event("memory.unavailable", detail=str(exc))
+            memory = None
+
     return Agent(
         settings,
         ChatClient(settings, router, trace=trace),
@@ -377,4 +446,5 @@ def build_agent(
         max_steps=max_steps,
         voice=voice,
         kill_switch=kill_switch,
+        memory=memory,
     )
