@@ -1121,3 +1121,38 @@ exact failure the README's opening claim is about, sitting inside the tool
 whose job is to catch it.
 
 **719 tests.**
+
+### Memory, with a model actually in the loop
+
+The P6 write-up ended with "no run has gone through the model with memory in
+the loop, for the same reason as every other phase: there is still no API key."
+That is now done, and it is the most convincing thing in this log.
+
+A scratch project with `from helper import greet` and no `helper` module. The
+task: *run it, work out why it fails, create whatever is missing, run it again.*
+
+**First run — 7 steps, 8 tool calls, 24.8 s.** It failed, tried `git status`
+(not a repository), then `ls -R`, `read_file app.py`, `ls`, before writing the
+module and succeeding. Ordinary exploration.
+
+The watcher stored the pair without being asked, and stored the right half of
+it: `mkdir helper` and the `echo "def greet..." > helper/__init__.py`, with the
+three diagnostics excluded. That `echo` redirect is precisely the case that
+broke the first version of `is_diagnostic` - it starts with a read-only command
+name and writes a file - so the delegation to the safety classifier is what
+made this capture correct rather than empty.
+
+**Second run, same error, `helper/` deleted — 3 steps, 4 tool calls, 2.6 s.**
+
+```json
+{"kind": "memory.recall",   "duration_ms": 195.43, "hits": 1, "best": 0.956, "cost": 0}
+{"kind": "memory.recalled", "action": "python3 app.py", "score": 0.956, "cost": 0}
+```
+
+It ran the script, failed, and went straight to the two commands from the first
+session - character for character, including the escaped newline in the `echo`.
+No `ls`, no `read_file`, no exploring. Seven steps became three, twenty-five
+seconds became under three, and the recall that caused it spent nothing.
+
+The `action` field in that trace line is new today: the hook used to record
+`command` and fire only for the shell.

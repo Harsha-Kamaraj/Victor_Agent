@@ -136,7 +136,7 @@ What still hasn't: **speech-to-text**, **vision**, and **memory with a model in 
 - **Actuation is verified on both, at different depths.** macOS is verified end to end, including a two-task GUI run. Windows has had one smoke test against File Explorer: perception and a real click through UI Automation's Invoke both worked, and it found four defects — all now fixed, with regression tests. See the [build log](docs/BUILD-LOG.md#p5--desktop-actuation-) for what has and has not been exercised there.
 - **A locked screen looks like an empty one.** Both platforms stop reporting window geometry when locked, so Victor checks and says so rather than reporting a window with no controls.
 - **Memory is semantic only with the extra installed.** `pip install -e '.[memory]'` pulls a ~130 MB ONNX model that matches paraphrases. Without it, recall falls back to a hashed bag of words that finds a traceback it has seen almost verbatim and nothing more. `victor doctor` reports which one is live, because "Victor remembers" means two different things.
-- **Memory has never seen a live model.** Capture and recall are wired to every tool and tested, but what a model does with a fix handed back to it is untested, for the same reason as everything above.
+- **Vision has never produced an answer.** Screen capture works, but the one live attempt hit a locked screen, so no image has reached a vision model. The request path is tested against a mock and the capture path is now real; the join between them is not.
 - **Free-tier numbers are declared, not discovered.** Providers change allowances without notice. The routing table in [src/victor/providers/registry.py](src/victor/providers/registry.py) states them conservatively, so Victor under-uses a generous tier rather than hitting a 429 mid-demo.
 - **Scout is a heuristic and says so on every run.** GitHub has no trending API, stars measure attention rather than quality, and the comparison set is seeded from your own topics — so it finds gaps adjacent to what you already do, not a view of the industry. Corpus results skew toward tutorials and awesome-lists, which outstar production code.
 - **The status strip polls; it does not stream.** It reads the ledger and the newest trace four times a second. A task that starts and finishes between two polls will not appear.
@@ -265,7 +265,17 @@ $ printf 'def greet...' > helper.py  ok=True   ← recorded as the intervention
 $ python3 app.py                     ok=True   → remembered how python3 was fixed
 ```
 
-Hit the same error again in a later session and the fix comes back — in **2.5 ms**, from a local ONNX model and a SQLite file, with **zero API calls** and no quota spent. `victor recall "<anything>"` searches it by hand, and `victor index <path>` adds project files.
+Hit the same error again in a later session and the fix comes back from a local ONNX model and a SQLite file, with **zero API calls** and no quota spent. `victor recall "<anything>"` searches it by hand, and `victor index <path>` adds project files.
+
+Measured against a live model, on the same `ModuleNotFoundError` twice:
+
+| | first run | second run |
+| --- | --- | --- |
+| steps | 7 | **3** |
+| tool calls | 8 | **4** |
+| wall clock | 24.8 s | **2.6 s** |
+
+The first run explored — `ls -R`, `read_file`, `ls` — before finding the fix. The second recalled it at 0.956 similarity in 195 ms and went straight to the two commands that worked, character for character. The trace records `cost: 0` on that recall, because the claim is worth nothing unless it is counted.
 
 "A later command succeeded" would have been the easier rule and a worse one: `pytest` fails, `ls` succeeds, and *"the fix is ls"* gets recalled confidently next time. Requiring the failing command itself to recover makes the pair verifiable rather than inferred — and when it never recovers, nothing is stored, because nothing has been learned.
 
