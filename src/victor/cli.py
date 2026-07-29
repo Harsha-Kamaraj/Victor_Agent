@@ -1275,6 +1275,103 @@ def sqlite_embedder(directory: Path):
         connection.close()
 
 
+# --- scout ----------------------------------------------------------------
+
+
+@app.command()
+def scout(
+    user: Annotated[str, typer.Option("--user", "-u", help="GitHub handle to analyse.")],
+    limit: Annotated[int, typer.Option("--limit", "-n", help="Gaps to show.")] = 6,
+    repos: Annotated[int, typer.Option("--repos", help="How many of their repos to read.")] = 30,
+    speak_report: Annotated[
+        bool, typer.Option("--speak/--no-speak", help="Read the summary aloud.")
+    ] = True,
+) -> None:
+    """Compare a GitHub portfolio against what is active in its field.
+
+    A heuristic, and the report says so. GitHub has no trending API, stars
+    measure attention rather than quality, and the comparison set is seeded
+    from the user's own topics - so the gaps found are adjacent to what they
+    already do rather than a view of the whole industry.
+    """
+    from .scout import GitHubError, RateLimited
+    from .scout import scout as run_scout
+
+    settings = _settings()
+    if not settings.has("github_token"):
+        console.print(
+            "[yellow]no GITHUB_TOKEN[/yellow] - using the unauthenticated API, "
+            "which allows 60 requests an hour. A token raises that to 5,000.\n"
+            "[dim]https://github.com/settings/tokens - no scopes needed for public data[/dim]\n"
+        )
+
+    try:
+        with console.status(f"reading {user}'s repositories..."):
+            report = run_scout(user, settings=settings, limit=limit, max_repos=repos)
+    except RateLimited as exc:
+        err_console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(7) from exc
+    except GitHubError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(7) from exc
+
+    if not report.repos_analysed:
+        console.print(f"[yellow]{user} has no public repositories to analyse[/yellow]")
+        raise typer.Exit(1)
+
+    console.print(f"[bold]{user}[/bold] - {report.repos_analysed} repositories analysed")
+    console.print(f"[dim]{report.corpus.provenance}[/dim]")
+    for note in report.corpus.query_notes:
+        console.print(f"[yellow]note:[/yellow] {note}")
+    console.print()
+
+    if not report.found:
+        console.print("[green]nothing stood out as a gap[/green]")
+    else:
+        table = Table(title="ranked gaps", title_justify="left")
+        table.add_column("topic", style="bold")
+        table.add_column("distance", overflow="fold")
+        table.add_column("seen in", justify="right")
+        table.add_column("evidence - the repos that produced this row", overflow="fold")
+
+        for gap in report.gaps:
+            table.add_row(
+                gap.topic,
+                gap.distance_note,
+                str(gap.prevalence),
+                f"{gap.cite()}\n[dim]your nearest: {gap.nearest_repo}[/dim]",
+            )
+        console.print(table)
+
+    if report.strengths:
+        console.print()
+        for strength in report.strengths:
+            console.print(
+                f"[green]covered[/green] {strength.topic} "
+                f"[dim]({strength.coverage:.2f} via {strength.repo})[/dim]"
+            )
+
+    console.print()
+    console.print(
+        "[dim]Distances are ranks within this comparison set, not absolute "
+        "scores - a sentence embedder puts almost all software writing in a "
+        "narrow band, so 'further than most of the set' is a claim that means "
+        "something and '0.58 similarity' is not. Far means unlike your work, "
+        "not bad."
+        f"\nGitHub API: {report.budget}[/dim]"
+    )
+
+    if speak_report:
+        from .voice import Player, build_synthesizer
+        from .voice import speak as do_speak
+
+        try:
+            synth = build_synthesizer(settings.paths.models_dir)
+            do_speak(synth, Player(), report.spoken())
+        except VictorError as exc:
+            console.print(f"[dim]could not speak the summary: {exc}[/dim]")
+
+
 @app.command()
 def tools() -> None:
     """List the tools the agent can call."""
