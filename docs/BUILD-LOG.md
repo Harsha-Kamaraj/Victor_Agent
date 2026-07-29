@@ -706,6 +706,8 @@ because "Victor remembers" means two different things.
 - No run has gone through the model with memory in the loop, for the same
   reason as every other phase: there is still no API key. The injection point is
   tested; the model's use of what it is handed is not.
+  *(Closed — see [Memory, with a model actually in the loop](#memory-with-a-model-actually-in-the-loop).
+  Seven steps became three on the second encounter with the same error.)*
 
 ---
 
@@ -849,6 +851,9 @@ not admit it invites its reader to believe it.
   needs a person at the machine.
 - **Still no live API key**, which remains the largest gap in the whole project
   and is now the first line of the README's "What this can't do".
+  *(Closed — see [First live model](#first-live-model-added-after-p8) and
+  [Running the paths that had never been run](#running-the-paths-that-had-never-been-run-added-after-p8).
+  `victor selftest --live` now reports 16 gates passing against real providers.)*
 
 ---
 
@@ -999,9 +1004,9 @@ the previous code, which is how I know they test something.
 
 ### Still outstanding
 
-- The same one as everything else: no run has gone through a live model with
-  memory in the loop. The injection point is tested; what a model does with a
-  recalled fix is not.
+- ~~The same one as everything else: no run has gone through a live model with
+  memory in the loop.~~ Done the same day — see
+  [Memory, with a model actually in the loop](#memory-with-a-model-actually-in-the-loop).
 
 ---
 
@@ -1326,3 +1331,82 @@ claims to see something teaches it to claim.
 **16 passed, 0 failed, 0 skipped.** Every phase gate, against the real thing.
 
 **744 tests.**
+
+---
+
+## CI, and what writing it found *(added after P8)*
+
+744 tests and nothing ran them. Four jobs now do, on every push: lint, the
+suite on Ubuntu, macOS and Windows, a minimal-install job, and a wheel build.
+
+**Windows is in the matrix because it is the platform nobody here develops on.**
+Gagan's machine has been the only Windows signal this project has, and it only
+fires when he has time to look. CI cannot click things, so it does not replace
+his hands-on verification of the P5 defects — but it stops Windows regressions
+arriving silently between his sessions, which is a different and cheaper job.
+Linux has no accessibility backend at all and is in the matrix to prove the
+core does not quietly depend on one.
+
+Writing it locally, against real throwaway virtualenvs rather than pushing and
+watching the runner, found three things that would each have been a red first
+build.
+
+### The suite could not be collected without the voice extra
+
+Four test modules `import numpy` at module scope. On an install without
+`[voice]` that is not four failures, it is a collection error — the other 700
+tests never run. They now `importorskip`, which is the honest shape: audio is
+numpy arrays end to end, so those tests genuinely need it, and skipping says so.
+Five more tests across `bench`, screen capture and spoken confirmation needed
+the same guard for the same reason.
+
+This is worth writing down because the fallback design was already right — the
+hashed embedder, `ArraySource` standing in for a microphone, FAISS degrading to
+a Python scan — and it was the *test harness*, not the code, that assumed a
+full install. Nobody had checked, because everyone who ran the suite had
+everything installed.
+
+### Two selftest gates called "not configured" a failure
+
+With no keys set, `victor selftest` reported FAIL on routing and on TTS. That
+is exactly the confusion the command was written to prevent, in the command
+itself, three commits after stating the rule.
+
+The voice gate imported numpy at the top of a helper, so an install without the
+extra raised `ModuleNotFoundError` straight past the check that would have
+skipped it. The routing gate is more interesting: it needed an API key to prove
+something that is pure arithmetic. Which model the chain picks is the ledger's
+counting and the table's ordering — no credential is involved, nothing is
+called. It now stands in a placeholder key when none is set, so fall-through
+logic is protected on every push, including the pushes CI runs with no keys at
+all. A gate that can only run on a developer's laptop protects nothing.
+
+### The jobs that check the boring things
+
+The minimal-install job runs `victor selftest` and requires exit 0, because a
+bare install reaching zero *by skipping honestly* is the claim the README
+makes. The build job installs the built wheel into a clean environment and runs
+the CLI from outside the source tree — an editable install works no matter what
+the wheel actually contains, so it can never catch a packaging mistake.
+
+**746 tests: 687 pass on a bare install, all 746 with the extras.**
+
+---
+
+## Where this stands
+
+Every phase gate passes against real providers — `victor selftest --live`
+reports **16 passed, 0 failed, 0 skipped**. What is left is not code:
+
+- **Nothing has gone voice → model → tool → speech end to end.** Both legs are
+  measured separately (Piper out; Whisper in at 246 ms p50) and the loop is
+  wired, but no person has yet spoken a sentence and watched it act. It needs a
+  microphone and a human, not another commit.
+- **No demo video.** The plan asks for 90 seconds across four scenarios. Same
+  reason.
+- **Windows is re-verified only by CI.** The four defects from Gagan's smoke
+  test are fixed with a regression test each, and the suite now runs on
+  `windows-latest` — but no one has re-run a real click through UI Automation
+  since the fixes landed. The screen-capture region fix in particular changes
+  the `mss` path, which is the Windows backend, and has only been exercised
+  against a stub.
