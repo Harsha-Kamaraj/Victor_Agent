@@ -74,7 +74,7 @@ LLAMA_31_8B = ModelSpec(
 
 GEMINI_25_FLASH = ModelSpec(
     provider="gemini",
-    model="gemini-2.5-flash",
+    model="gemini-flash-latest",
     workloads=(Workload.VISION,),
     credential="gemini_api_key",
     limits=QuotaLimits(
@@ -82,6 +82,12 @@ GEMINI_25_FLASH = ModelSpec(
         requests_per_day=250,
         reset_timezone=GOOGLE_DAY,
     ),
+    # Deliberately the moving alias rather than a pinned version. This was
+    # `gemini-2.5-flash` until Google retired it for new accounts - the model
+    # was still listed by the API and returned 404 on every call, with
+    # "no longer available to new users". A pinned ID rots silently and takes
+    # the primary vision model with it; the alias is Google's own answer to
+    # which flash model a new key may use today.
     notes="Primary vision. Scarcest resource in the stack - spend it last.",
 )
 

@@ -621,6 +621,79 @@ def test_a_spent_budget_degrades_rather_than_crashes(settings: Settings, tmp_pat
         client.locate("anything", a_shot(), a_snapshot())
 
 
+def test_a_retired_model_falls_through_to_the_next_one(
+    settings: Settings, tmp_path
+) -> None:
+    """Observed live: Google retired the pinned Gemini model for new accounts,
+    every call 404'd with "no longer available to new users", and vision failed
+    outright - while Groq's vision model sat behind it working fine and was
+    never asked. The router fell through on *ledger* exhaustion only."""
+    asked: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        asked.append(str(request.url))
+        if "generativelanguage" in str(request.url):
+            return httpx.Response(
+                404, json={"error": {"message": "no longer available to new users"}}
+            )
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "1"}}]}
+        )
+
+    client, _ = vision_client(settings, tmp_path, handler)
+    answer = client.locate("the search box", a_shot(), a_snapshot())
+
+    assert answer.index == 1
+    assert len(asked) == 2, "the fallback was never asked"
+    assert LLAMA_4_SCOUT.model in answer.model
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (429, {}),  # rate limited right now
+        (401, {}),  # this provider's key is bad; the other one's may not be
+        (404, {"error": {"message": "gone"}}),  # model retired
+        (503, {}),  # provider having a bad day
+    ],
+)
+def test_any_provider_side_refusal_tries_the_next_model(
+    settings: Settings, tmp_path, status: int, body: dict
+) -> None:
+    """None of these are reasons to stop looking at the screen - they are
+    reasons to ask someone else."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "generativelanguage" in str(request.url):
+            return httpx.Response(status, json=body)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "1"}}]})
+
+    client, _ = vision_client(settings, tmp_path, handler)
+    assert client.locate("the search box", a_shot(), a_snapshot()).index == 1
+
+
+def test_every_model_refusing_says_which_and_why(settings: Settings, tmp_path) -> None:
+    """When the whole chain is out, the reason has to name the models - that is
+    the difference between "vision is broken" and a diagnosis."""
+    client, _ = vision_client(
+        settings, tmp_path, lambda r: httpx.Response(404, json={"error": {"message": "gone"}})
+    )
+
+    with pytest.raises(VisionUnavailable) as exc:
+        client.locate("anything", a_shot(), a_snapshot())
+
+    assert "every vision model refused" in str(exc.value)
+    assert GEMINI_25_FLASH.model in str(exc.value)
+    assert LLAMA_4_SCOUT.model in str(exc.value)
+
+
+def test_the_pinned_gemini_model_is_one_a_new_key_can_use(settings: Settings) -> None:
+    """A pinned version rots silently and takes the primary vision model with
+    it. `gemini-2.5-flash` was retired for new accounts while still being
+    listed by the models endpoint, so nothing caught it until a live call."""
+    assert GEMINI_25_FLASH.model == "gemini-flash-latest"
+
+
 def test_none_means_no_element(settings: Settings, tmp_path) -> None:
     client, _ = vision_client(
         settings,

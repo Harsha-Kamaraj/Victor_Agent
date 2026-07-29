@@ -2,7 +2,7 @@
 
 A voice-driven computer-use agent for **Windows and macOS** that runs entirely on free API tiers — because it reads the accessibility tree instead of guessing pixels.
 
-**Status: all eight phases complete.** 737 tests, and `victor doctor` reports what is genuinely unavailable on your machine rather than a green tick for something that does not work.
+**Status: all eight phases complete.** 744 tests, and `victor doctor` reports what is genuinely unavailable on your machine rather than a green tick for something that does not work.
 
 Two documents, deliberately separate: [docs/PLAN.md](docs/PLAN.md) is the plan of record — what was intended, why, and what was deliberately cut. [docs/BUILD-LOG.md](docs/BUILD-LOG.md) is what actually happened, including the decisions that changed during implementation and the measured numbers.
 
@@ -36,7 +36,7 @@ Free tiers differ wildly in generosity, so each workload is routed to whichever 
 | Workload | Provider | Free allowance |
 | --- | --- | --- |
 | Text reasoning (ReAct loop, tool choice) | Groq `gpt-oss-120b` | ~1,000–14,400 req/day |
-| Vision (fallback only) | Gemini 2.5 Flash → Groq Llama-4-Scout | ~250/day → +~1,000/day |
+| Vision (fallback only) | Gemini Flash → Groq Llama-4-Scout | ~250/day → +~1,000/day |
 | Speech-to-text | Groq `whisper-large-v3-turbo` | 28,800 audio sec/day |
 | Text-to-speech | Piper (local ONNX) | unlimited, offline |
 | Embeddings | fastembed (local ONNX) | unlimited, offline |
@@ -48,7 +48,7 @@ Routing is not a diagram; it is code you can interrogate:
 
 ```console
 $ victor route vision
-   gemini:gemini-2.5-flash daily request limit reached (250/250)
+   gemini:gemini-flash-latest daily request limit reached (250/250)
      Primary vision. Scarcest resource in the stack - spend it last.
 -> groq:meta-llama/llama-4-scout-17b-16e-instruct
      Vision fallback once Gemini's 250/day is gone.
@@ -113,10 +113,9 @@ Not projected — run `victor bench voice` and get these on your own machine. Ma
 | TTS time-to-first-audio, 3 sentences | 42 ms | 47 ms |
 | TTS full synthesis, 3 sentences | 109 ms | 113 ms |
 | TTS realtime factor | 0.036× | 0.037× |
+| STT round trip (Groq Whisper, live) | 246 ms | 533 ms |
 
 Piper emits one chunk per sentence, so a one-sentence reply gets no benefit from streaming playback — time-to-first-audio *is* the synthesis time. Across three sentences it drops from 109 ms to 42 ms. Both are reported because averaging them would hide the effect.
-
-| STT round trip (Groq Whisper, live) | 246 ms | 533 ms |
 
 The STT figure is a real network round trip, measured with `victor bench --voice --stt`, which spends real audio quota. The full voice→voice loop is still unmeasured: it needs a person speaking into a microphone, and this table would rather have a gap than an estimate.
 
@@ -124,9 +123,9 @@ The STT figure is a real network round trip, measured with `victor bench --voice
 
 Stated upfront rather than discovered later. This section is longer than most projects' and that is deliberate — it is the part a reader can check.
 
-**Vision has not produced an answer yet.** It is the last path that has only ever met a mock. Screen capture works and the request shape is tested, but the one live attempt hit a locked screen, so no image has reached a vision model. Everything else has: `victor selftest --live` runs each phase's exit gate against the real thing, and reports **12 passed, 0 failed** on this machine.
+**Nothing has gone voice → model → tool → speech end to end.** That is the last gap, and it needs a person at a microphone rather than more code. Every individual path has now met a real model: `victor selftest --live` runs each phase's exit gate against the real thing and reports **16 passed, 0 failed, 0 skipped** on this machine — the ReAct loop, tool schemas, prompts, speech-to-text, vision and memory recall all exercised by something other than `httpx.MockTransport`.
 
-That retires the gap this section used to open with — *"never run with a live API key"*. The ReAct loop, the tool schemas, the prompts, speech-to-text and memory recall have all now been exercised by something other than `httpx.MockTransport`. Nothing has gone voice → model → tool → speech end to end, though, because that needs a person at a microphone.
+That retires the gap this section used to open with, *"never run with a live API key"*. Vision was the last to fall: asked for *"the folder icon for Projects"* against a real screenshot, Gemini answered `[3] Projects`.
 
 - **Not sub-500ms.** Voice → shell is ~600–900 ms. Voice → vision → act → speak is 2–6 s. Both remain estimates: the model half is now real but the voice half has not been measured against it. The voice-stack numbers below are real.
 - **Push-to-talk is terminal-scoped.** `victor listen --mode ptt` starts and stops on Enter. A system-wide hotkey needs an OS-level hook and lands with the HUD in P8.

@@ -1248,3 +1248,81 @@ persisted yesterday and reopened today - which is the only way it ever actually
 happens.
 
 **737 tests.**
+
+---
+
+## Vision, and the model that had been retired *(added after P8)*
+
+With the screen unlocked, `victor selftest --live` ran every gate for the first
+time - and the vision gate failed:
+
+```
+FAIL P4  a vision model locates an element the tree could not name
+         gemini:gemini-2.5-flash: HTTP 404: This model models/gemini-2.5-flash
+         is no longer available to new users.
+```
+
+Google had retired the pinned model for new accounts. The routing table had
+named it since P0 and nothing had ever called it, so the primary vision model
+had been dead on arrival for any key created after the cutoff.
+
+Two things needed fixing, and only one of them was the model name.
+
+### A pinned version rots; the alias does not
+
+`models/gemini-2.5-flash` is **still listed** by the models endpoint and 404s on
+every call. Probing the key directly:
+
+```
+gemini-2.5-flash       404  no longer available to new users
+gemini-2.5-flash-lite  404  no longer available to new users
+gemini-flash-latest    200  OK
+```
+
+So the listing cannot be trusted to say what a key may call, and a pinned
+version cannot be trusted to keep working. The table now names
+`gemini-flash-latest` - Google's own answer to "which flash model may this key
+use today", which is the question actually being asked. There is a test
+asserting the model is not a pinned version, because the failure mode is silent
+until someone spends a request.
+
+### The fallback chain was not a chain
+
+The worse finding. `VisionClient.locate` selected one model and called it. The
+README has always described vision as *Gemini → Groq Llama-4-Scout*, and that
+fallback worked - but only for exhaustion the **ledger** already knew about. A
+model that failed *live* took vision down with it, while a working fallback sat
+behind it and was never asked.
+
+The text path has had a fall-through loop since P2. Vision now has the same
+one, and rather more of the response is treated as "ask someone else":
+
+- **429** - rate limited now, another provider may not be
+- **404** - this model is gone for this key
+- **401/403** - a bad Gemini key is no reason to refuse to use Groq
+- **5xx** and connection errors - this provider's bad day
+
+Only a 4xx that means "your request is malformed" still ends the call, because
+that one will fail identically everywhere and hiding it would hide a bug.
+
+When the whole chain does refuse, the error names each model and what it said.
+"Vision is broken" is not a diagnosis; "gemini said the model is gone, groq
+said rate limited" is.
+
+### Then it worked
+
+```console
+$ # against the real screen, Finder, six elements in the tree
+$ asked for 'the folder icon for Projects'
+-> [3] Projects  via gemini:gemini-flash-latest in 5644ms
+```
+
+A real screenshot, a real Gemini call, the right element. Asked instead for
+"the button that closes this window" against a desktop with no window open, it
+answered `no matching element` - which is the honest answer and the one the
+gate is written to accept, because a gate that only passes when the model
+claims to see something teaches it to claim.
+
+**16 passed, 0 failed, 0 skipped.** Every phase gate, against the real thing.
+
+**744 tests.**

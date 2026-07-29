@@ -76,6 +76,15 @@ class VisionUnavailable(ProviderError):
     """No vision model can be called right now - usually the day's quota."""
 
 
+class _ProviderRefused(Exception):
+    """Internal: this model would not answer, but another one might.
+
+    Distinct from :class:`VisionUnavailable`, which means the whole chain is
+    out. Anything raised as this is a reason to try the next model, not a
+    reason to give up on looking at the screen.
+    """
+
+
 class VisionClient:
     """Asks a vision model which numbered element to act on."""
 
@@ -109,21 +118,51 @@ class VisionClient:
         Raises :class:`VisionUnavailable` when the budget is spent, so callers
         can say so out loud and fall back to the tree rather than crash.
         """
-        try:
-            selection = self._router.select(Workload.VISION)
-        except NoProviderAvailable as exc:
-            raise VisionUnavailable(
-                "no vision quota left today - falling back to the accessibility tree"
-            ) from exc
-
-        self._trace.selection(selection)
         prompt = _prompt(request, snapshot)
-        self._router.record(selection)
+        tried: set[str] = set()
+        refused: list[str] = []
 
-        started = time.perf_counter()
-        with self._trace.span("vision.locate", model=selection.key, request=request) as span:
-            raw = self._call(selection, prompt, shot)
-            span["answer"] = raw[:80]
+        # Walk the chain rather than asking once. The router already falls
+        # through when the *ledger* says a model is spent, and that was taken
+        # for the whole story - so a provider that failed live took vision down
+        # with it, even though a working fallback was sitting right behind it.
+        # Found when Google retired the pinned Gemini model: every call 404'd
+        # and Groq's vision model, which was fine, was never asked.
+        while True:
+            try:
+                selection = self._router.select(Workload.VISION, skip=tried)
+            except NoProviderAvailable as exc:
+                # Two different endings, worth telling apart. Nothing refused
+                # us live means the ledger is simply out - the ordinary,
+                # expected end of a day's vision budget. Anything in `refused`
+                # means models were asked and said no, and which ones said what
+                # is the whole of the diagnosis.
+                reason = (
+                    f"every vision model refused: {'; '.join(refused)}"
+                    if refused
+                    else "no vision quota left today"
+                )
+                raise VisionUnavailable(
+                    f"{reason} - falling back to the accessibility tree"
+                ) from exc
+
+            self._trace.selection(selection)
+            self._router.record(selection)
+
+            started = time.perf_counter()
+            try:
+                with self._trace.span(
+                    "vision.locate", model=selection.key, request=request
+                ) as span:
+                    raw = self._call(selection, prompt, shot)
+                    span["answer"] = raw[:80]
+            except _ProviderRefused as exc:
+                tried.add(selection.key)
+                refused.append(f"{selection.key}: {exc}")
+                self._trace.event("vision.fallthrough", model=selection.key, detail=str(exc))
+                continue
+            break
+
         latency_ms = (time.perf_counter() - started) * 1000
 
         index = _parse_index(raw)
@@ -188,13 +227,27 @@ class VisionClient:
         try:
             response = self._client.post(url, headers=headers, json=payload)
         except httpx.HTTPError as exc:
-            raise ProviderError(f"{selection.key}: {type(exc).__name__}: {exc}") from exc
+            # A timeout or a refused connection is this provider's problem, not
+            # a reason to stop looking at the screen.
+            raise _ProviderRefused(f"{type(exc).__name__}: {exc}") from exc
 
+        # Everything a provider can say that another provider might not. All of
+        # these used to end the call; each is now a reason to ask the next model
+        # in the chain, which is what the chain is for. A rejected key is in
+        # here deliberately: a bad Gemini key is no reason to refuse to use
+        # Groq's vision model.
         if response.status_code == 429:
-            raise VisionUnavailable(f"{selection.key}: rate limited")
+            raise _ProviderRefused("rate limited")
         if response.status_code in (401, 403):
             env = (selection.spec.credential or "api key").upper()
-            raise ProviderError(f"{selection.key}: {env} rejected (HTTP {response.status_code})")
+            raise _ProviderRefused(f"{env} rejected (HTTP {response.status_code})")
+        if response.status_code == 404:
+            raise _ProviderRefused(
+                f"model {selection.spec.model!r} is not available to this key "
+                f"({response.text[:120]})"
+            )
+        if response.status_code >= 500:
+            raise _ProviderRefused(f"provider error HTTP {response.status_code}")
         if response.status_code >= 400:
             raise ProviderError(
                 f"{selection.key}: HTTP {response.status_code}: {response.text[:200]}"
