@@ -49,11 +49,23 @@ def test_doctor_reports_unbuilt_phases_as_pending(settings: Settings) -> None:
     checks = run_checks(settings, network=False)
     pending = {c.name for c in checks if c.status is Status.PENDING}
 
-    # Honesty check: nothing from a later phase may report OK yet.
-    assert "memory index" in pending
+    # Honesty check: nothing from a later phase may report OK yet. P6 shipped,
+    # so "memory index" moved out of this set and P7/P8 are what remain.
+    assert "scout" in pending
+    assert "status HUD" in pending
     assert not any(
         c.status is Status.OK and "not implemented" in c.detail for c in checks
     )
+
+
+def test_doctor_checks_memory_for_real_now_that_p6_exists(settings: Settings) -> None:
+    """P6 shipped, so the store must be opened rather than reported PENDING."""
+    names = {c.name: c for c in run_checks(settings, network=False)}
+
+    assert names["memory"].status is not Status.PENDING
+    assert names["memory index"].status is not Status.PENDING
+    # Which embedder answered is part of the claim, so it has to be stated.
+    assert "semantic" in names["memory"].detail or "repeated text" in names["memory"].detail
 
 
 def test_doctor_checks_voice_for_real_now_that_p1_exists(settings: Settings) -> None:

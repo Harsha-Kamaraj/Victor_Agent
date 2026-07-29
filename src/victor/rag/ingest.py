@@ -67,16 +67,6 @@ SKIP_DIRS = frozenset(
     }
 )
 
-#: Commands that look at things. A successful one of these is not a fix - it is
-#: what you do *while* looking for the fix.
-DIAGNOSTIC = frozenset(
-    {
-        "ls", "dir", "pwd", "cd", "cat", "bat", "head", "tail", "less", "more",
-        "grep", "rg", "find", "which", "where", "echo", "printf", "tree",
-        "ps", "top", "df", "du", "stat", "file", "wc", "env", "printenv",
-        "whoami", "date", "history", "man", "help", "type",
-    }
-)
 
 
 def chunk_text(text: str, size: int = CHUNK_CHARS, overlap: int = CHUNK_OVERLAP) -> list[str]:
@@ -187,8 +177,27 @@ def command_head(command: str) -> str:
 
 
 def is_diagnostic(command: str) -> bool:
-    """Was this command looking, rather than changing?"""
-    return command_head(command).split()[0] in DIAGNOSTIC if command.strip() else True
+    """Was this command looking, rather than changing?
+
+    Delegated to the P3 classifier rather than answered again here. That is the
+    same question the safety layer asks before deciding whether to confirm
+    something, and two definitions of "this only reads" drift apart: the first
+    version of this function kept its own list of command names, which called
+    ``printf 'x' > helper.py`` diagnostic because it starts with ``printf``.
+    It writes a file. The classifier already knew that - it has a rule for
+    redirects - and reusing it means a fix that writes a file is recognised as
+    a fix, and any future improvement to one benefits the other.
+    """
+    if not command.strip():
+        return True
+    from ..safety.classify import Risk, classify_shell
+
+    try:
+        return classify_shell(command).risk is Risk.SAFE
+    except Exception:
+        # A command the classifier cannot parse is not obviously a read, and
+        # treating it as one would silently drop it from the interventions.
+        return False
 
 
 _NOISE = re.compile(r"^\s*(File \"|\s+at |\s{4,})")

@@ -272,9 +272,30 @@ def test_diagnostics_are_recognised(command):
     assert is_diagnostic(command)
 
 
-@pytest.mark.parametrize("command", ["pip install httpx", "npm ci", "make build"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pip install httpx",
+        "npm ci",
+        "make build",
+        # Starts with a read-only command name and writes a file anyway. The
+        # first version of is_diagnostic kept its own list of names and called
+        # this diagnostic, so the fix that created the missing module was
+        # dropped and nothing was ever remembered.
+        "printf 'def greet(): pass' > helper.py",
+        "echo PATCHED > config.ini",
+    ],
+)
 def test_changes_are_not_diagnostics(command):
     assert not is_diagnostic(command)
+
+
+def test_diagnostic_agrees_with_the_safety_classifier():
+    """One definition of "this only reads", not two that drift apart."""
+    from victor.safety.classify import Risk, classify_shell
+
+    for command in ("ls -la", "cat x > y", "rm -rf build", "git status", "sed -i s/a/b/ f"):
+        assert is_diagnostic(command) is (classify_shell(command).risk is Risk.SAFE)
 
 
 # --- summarising and chunking ---------------------------------------------
