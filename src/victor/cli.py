@@ -1398,7 +1398,105 @@ def tools() -> None:
     )
 
 
+# --- the status strip -----------------------------------------------------
+
+
+@app.command()
+def hud(
+    text: Annotated[
+        bool, typer.Option("--text", help="Draw in the terminal instead of a window.")
+    ] = False,
+    once: Annotated[
+        bool, typer.Option("--once", help="Print one reading and exit. For scripts.")
+    ] = False,
+) -> None:
+    """A live status strip: what Victor is doing, and what it has spent.
+
+    Reads the quota ledger and session traces off disk rather than being
+    driven by the agent, so it can be started before or after a task and in a
+    different terminal. The coupling is a directory.
+    """
+    import time
+
+    from .ui.hud import Hud, HudUnavailable, build_monitor
+
+    monitor = build_monitor(_settings())
+
+    if once:
+        snapshot = monitor.read()
+        console.print(f"{snapshot.state}  [dim]{snapshot.detail}[/dim]  {snapshot.cost_line}")
+        return
+
+    if not text:
+        try:
+            Hud(monitor).run()
+            return
+        except HudUnavailable as exc:
+            console.print(f"[yellow]{exc}[/yellow]")
+
+    # Terminal fallback. Same monitor, same numbers, no window server needed -
+    # which matters over SSH and in a container, where the story still has to
+    # be visible.
+    from rich.live import Live
+
+    def strip() -> Text:
+        snapshot = monitor.read()
+        line = Text()
+        line.append(f"{snapshot.state:<12}", style="bold green")
+        line.append(f"{snapshot.detail[:48]:<50}", style="dim")
+        line.append(
+            snapshot.cost_line, style="green" if snapshot.spent == 0 else "yellow"
+        )
+        return line
+
+    console.print("[dim]Ctrl-C to close.[/dim]")
+    try:
+        with Live(strip(), console=console, refresh_per_second=4) as live:
+            while True:
+                time.sleep(0.4)
+                live.update(strip())
+    except KeyboardInterrupt:
+        console.print("[dim]closed[/dim]")
+
+
 # --- benchmarks -----------------------------------------------------------
+
+
+def _bench_from_traces() -> None:
+    """The full-pipeline table, regenerated from what actually ran.
+
+    Nothing here is typed in. Every row came out of a session trace, which is
+    what keeps the README's figures true as the code changes underneath them.
+    """
+    from .bench import collect
+
+    settings = _settings()
+    report = collect(settings.paths.ensure().traces_dir)
+
+    if not report.stages:
+        console.print(f"[yellow]{report.summary()}[/yellow]")
+        return
+
+    table = Table(title="measured from session traces", title_justify="left")
+    table.add_column("stage", style="bold")
+    table.add_column("p50", justify="right")
+    table.add_column("p95", justify="right")
+    table.add_column("n", justify="right")
+
+    for stage in report.stages:
+        count = Text(str(stage.count), style="" if stage.trustworthy else "yellow")
+        table.add_row(
+            stage.name, f"{stage.p50:.0f} ms", f"{stage.p95:.0f} ms", count
+        )
+    console.print(table)
+    console.print(f"\n[dim]{report.summary()}[/dim]")
+
+    thin = [s for s in report.stages if not s.trustworthy]
+    if thin:
+        console.print(
+            f"[dim]n < 20 on {len(thin)} row{'s' if len(thin) != 1 else ''}: "
+            "'p95' there is the worst single sample, not a percentile.[/dim]"
+        )
 
 
 @app.command()
@@ -1413,8 +1511,15 @@ def bench(
     playback: Annotated[
         bool, typer.Option("--playback", help="Play audio while timing.")
     ] = False,
+    traces: Annotated[
+        bool,
+        typer.Option("--traces", help="Summarise every stage from recorded sessions."),
+    ] = False,
 ) -> None:
     """Measure latency on this machine. Numbers come from real runs."""
+    if traces:
+        _bench_from_traces()
+        return
     if not voice:
         console.print("[dim]only the voice legs are measurable so far; --voice is implied.[/dim]")
     from .voice.bench import bench_pipeline, summarise
