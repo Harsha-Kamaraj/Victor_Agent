@@ -105,6 +105,78 @@ def test_dry_run_previews_what_a_glob_matched(tmp_path: Path) -> None:
     assert "a.log" in review.reason
 
 
+# --- the preview has to be true, not merely present ------------------------
+#
+# A preview is what the user approves, so a wrong one is worse than none: it
+# buys consent for something that will not happen. These three were all found by
+# running the branches nobody had run - the redirect and move previews had no
+# test coverage at all - and all three erred in the same direction, understating
+# or misnaming the change.
+
+
+def test_a_quoted_redirect_does_not_hide_the_real_target(tmp_path: Path) -> None:
+    """`echo "a > b" > out.txt` previewed as "would create b". The user would be
+    approving a file the command never touches, while out.txt is the one it
+    actually writes."""
+    from victor.safety.preview import preview
+
+    assert preview('echo "a > b" > out.txt', tmp_path) == "would create out.txt"
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("echo hi >out.txt", "would create out.txt"),  # no space
+        ("echo boom >&2", "would run: echo boom >&2"),  # not a file
+        ("ls 2>err.txt", "would run: ls 2>err.txt"),  # stderr, not a truncation
+    ],
+)
+def test_redirect_forms_that_are_not_a_file_write(
+    tmp_path: Path, command: str, expected: str
+) -> None:
+    from victor.safety.preview import preview
+
+    assert preview(command, tmp_path) == expected
+
+
+def test_every_source_of_a_move_is_named(tmp_path: Path) -> None:
+    """It reported the first operand only, so `mv a b c dir/` was previewed as
+    moving one file. Approving a third of an action is not approving it."""
+    from victor.safety.preview import preview
+
+    (tmp_path / "dir").mkdir()
+    rendered = preview("mv a.txt b.txt c.txt dir/", tmp_path)
+
+    assert "3 files" in rendered
+    for name in ("a.txt", "b.txt", "c.txt"):
+        assert name in rendered
+
+
+def test_moving_into_a_directory_says_what_it_replaces(tmp_path: Path) -> None:
+    """The commonest way a move quietly destroys something: the destination is a
+    directory that already holds a file of that name. Nothing in the command
+    says so, and the preview did not either."""
+    from victor.safety.preview import preview
+
+    (tmp_path / "dir").mkdir()
+    (tmp_path / "dir" / "notes.txt").write_text("precious", encoding="utf-8")
+    (tmp_path / "notes.txt").write_text("new", encoding="utf-8")
+
+    rendered = preview("mv notes.txt dir/", tmp_path)
+    assert "replacing what is already there" in rendered
+    assert "notes.txt" in rendered
+
+
+def test_moving_into_a_directory_with_no_collision_stays_quiet(tmp_path: Path) -> None:
+    """The warning has to mean something, so it must not always appear."""
+    from victor.safety.preview import preview
+
+    (tmp_path / "dir").mkdir()
+    rendered = preview("mv notes.txt dir/", tmp_path)
+    assert "replacing" not in rendered
+    assert rendered == "would move notes.txt to dir/"
+
+
 def test_dry_run_falls_back_to_the_command_when_it_cannot_predict() -> None:
     gate = interceptor(dry_run=True)
     review = gate.review(SHELL, {"command": "make deploy"})

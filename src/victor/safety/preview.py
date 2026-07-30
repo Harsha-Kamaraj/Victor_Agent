@@ -15,7 +15,6 @@ writing or runs the command it is describing.
 
 from __future__ import annotations
 
-import re
 import shlex
 from pathlib import Path
 
@@ -23,8 +22,6 @@ from .trash import describe as describe_delete
 from .trash import parse_delete
 
 MAX_LISTED = 6
-
-_REDIRECT = re.compile(r"(?<![0-9<>])(>{1,2})(?!&)\s*(\S+)")
 
 
 def preview(command: str, cwd: Path | None = None) -> str:
@@ -46,14 +43,37 @@ def _preview_delete(command: str, cwd: Path) -> str | None:
     return f"would delete {describe_delete(plan, MAX_LISTED)}"
 
 
+def _find_redirect(tokens: list[str]) -> tuple[str, str] | None:
+    """``(operator, target)`` for a redirect among ``tokens``, else ``None``.
+
+    Scans tokens rather than the raw string, which is what makes a quoted
+    ``>`` harmless. ``echo "a > b" > out.txt`` used to be previewed as "would
+    create b" - the regex found the first ``>`` it could see and never reached
+    the real target. shlex has already decided what is a word and what is an
+    operator, so a ``>`` inside quotes arrives as part of a larger token and
+    cannot be mistaken for one.
+    """
+    for position, token in enumerate(tokens):
+        if token in (">", ">>"):
+            following = tokens[position + 1 :]
+            return (token, following[0]) if following else None
+        # `>out.txt` with no space is one token; `>&2` is not a file at all.
+        if token.startswith(">") and not token.startswith(">&"):
+            operator = ">>" if token.startswith(">>") else ">"
+            rest = token[len(operator) :]
+            if rest:
+                return operator, rest
+    return None
+
+
 def _preview_redirect(command: str, cwd: Path) -> str | None:
     """Report whether a redirect creates a file or overwrites an existing one."""
-    match = _REDIRECT.search(command)
-    if match is None:
+    found = _find_redirect(_tokens(command))
+    if found is None:
         return None
 
-    operator, raw = match.groups()
-    target = Path(raw.strip("\"'"))
+    operator, raw = found
+    target = Path(raw)
     if not target.is_absolute():
         target = cwd / target
 
@@ -77,7 +97,14 @@ def _preview_mkdir(command: str, cwd: Path) -> str | None:
 
 
 def _preview_move(command: str, cwd: Path) -> str | None:
-    """A move that lands on an existing path destroys it - say so."""
+    """A move that lands on an existing path destroys it - say so.
+
+    Two things this got wrong, both understating the change, which is the
+    direction that matters: it reported only the first of several sources, so
+    ``mv a b c dir/`` was previewed as moving one file; and it said nothing when
+    the destination was a directory already holding a file of that name, which
+    is the commonest way a move quietly destroys something.
+    """
     tokens = _tokens(command)
     if not tokens or tokens[0] not in {"mv", "move", "cp"}:
         return None
@@ -85,13 +112,38 @@ def _preview_move(command: str, cwd: Path) -> str | None:
     if len(operands) < 2:
         return None
 
-    source, destination = operands[0], operands[-1]
-    target = cwd / destination if not Path(destination).is_absolute() else Path(destination)
+    *sources, destination = operands
     verb = "copy" if tokens[0] == "cp" else "move"
+    target = Path(destination) if Path(destination).is_absolute() else cwd / destination
+
     if target.is_file():
         size = target.stat().st_size
-        return f"would {verb} {source} over {destination}, discarding its {size:,} bytes"
-    return f"would {verb} {source} to {destination}"
+        moved = sources[0] if len(sources) == 1 else f"{len(sources)} files"
+        return f"would {verb} {moved} over {destination}, discarding its {size:,} bytes"
+
+    if target.is_dir():
+        # Landing in a directory that already holds a file of the same name
+        # overwrites it, and nothing in the command says so.
+        clobbered = [s for s in sources if (target / Path(s).name).is_file()]
+        if clobbered:
+            listed = ", ".join(clobbered[:MAX_LISTED])
+            hidden = len(clobbered) - MAX_LISTED
+            more = f", and {hidden} more" if hidden > 0 else ""
+            return (
+                f"would {verb} {_describe_sources(sources)} into {destination}, "
+                f"replacing what is already there: {listed}{more}"
+            )
+
+    return f"would {verb} {_describe_sources(sources)} to {destination}"
+
+
+def _describe_sources(sources: list[str]) -> str:
+    """Name every source, because naming one of three is a false preview."""
+    if len(sources) == 1:
+        return sources[0]
+    listed = ", ".join(sources[:MAX_LISTED])
+    more = f", and {len(sources) - MAX_LISTED} more" if len(sources) > MAX_LISTED else ""
+    return f"{len(sources)} files ({listed}{more})"
 
 
 def _tokens(command: str) -> list[str]:

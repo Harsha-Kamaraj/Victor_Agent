@@ -2,7 +2,7 @@
 
 A voice-driven computer-use agent for **Windows and macOS** that runs entirely on free API tiers — because it reads the accessibility tree instead of guessing pixels.
 
-**Status: all eight phases complete.** 758 tests, and `victor doctor` reports what is genuinely unavailable on your machine rather than a green tick for something that does not work.
+**Status: all eight phases complete.** 765 tests, and `victor doctor` reports what is genuinely unavailable on your machine rather than a green tick for something that does not work.
 
 Two documents, deliberately separate: [docs/PLAN.md](docs/PLAN.md) is the plan of record — what was intended, why, and what was deliberately cut. [docs/BUILD-LOG.md](docs/BUILD-LOG.md) is what actually happened, including the decisions that changed during implementation and the measured numbers.
 

@@ -1534,3 +1534,46 @@ non-origin cases the original bug needed and no test covered. Memory works
 offline on Windows. **Zero API requests across his entire session.**
 
 **758 tests.**
+
+---
+
+## Three false previews *(added after P8)*
+
+With no bugs left on the list, the next best thing is to go looking where bugs
+are likely rather than wait for one to be reported. Coverage was the map:
+`safety/preview.py` at **65%**, with the redirect and move branches at zero.
+
+That module is where a wrong answer costs the most. A preview is what the user
+*approves*; it is the whole mechanism by which consent is informed. A preview
+that is merely absent leaves the user cautious. A preview that is wrong buys
+consent for something that will not happen — and all three defects here erred in
+the same direction, understating or misnaming the change.
+
+| command | previewed as | what it does |
+|---|---|---|
+| `echo "a > b" > out.txt` | would create **b** | creates `out.txt` |
+| `mv a.txt b.txt c.txt dir/` | would move **a.txt** | moves three files |
+| `mv notes.txt dir/` | would move to `dir/` | destroys `dir/notes.txt` |
+
+**The quoted redirect.** The old code searched the raw command string with a
+regex, so the first `>` it found won — including one inside a quoted argument.
+The fix scans shlex tokens instead, which works because shlex has already
+decided what is a word: a `>` inside quotes arrives as part of a larger token
+and cannot be mistaken for an operator. `>&2` and `2>err.txt` still correctly
+produce no file-write preview, and `>out.txt` with no space still does.
+
+**One of three sources.** `operands[0]` was reported as *the* source. Approving
+a third of an action is not approving it.
+
+**The silent clobber.** A move whose destination is a directory already holding
+a file of that name overwrites it, and nothing in the command hints at that —
+it is the commonest way `mv` quietly destroys something. The preview now names
+what would be replaced, and stays quiet when there is no collision, because a
+warning that always fires stops being read.
+
+None of these would have been found by reading the code; all three came from
+running the branches with real files on disk and comparing the sentence against
+the truth. The lesson is the same one the Windows passes keep teaching: the gap
+is never in the logic you examined, it is in the input you never supplied.
+
+**765 tests.**
