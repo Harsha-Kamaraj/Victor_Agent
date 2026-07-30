@@ -95,16 +95,18 @@ class Trash:
 
     def store(self, path: Path) -> TrashedItem:
         """Move ``path`` into the trash and record how to put it back."""
-        source = path.resolve()
-        if not source.exists():
+        source = locate(path)
+        if not source.exists() and not source.is_symlink():
             raise FileNotFoundError(source)
 
         self.session_dir.mkdir(parents=True, exist_ok=True)
         # A flat store with a unique prefix: two files called config.json from
         # different directories must not collide.
         stored = self.session_dir / f"{uuid.uuid4().hex[:8]}_{source.name}"
-        is_dir = source.is_dir()
-        size = _size_of(source)
+        # A symlink is a thing in its own right: not a directory even when it
+        # points at one, and its own size rather than its target's.
+        is_dir = source.is_dir() and not source.is_symlink()
+        size = 0 if source.is_symlink() else _size_of(source)
 
         shutil.move(str(source), str(stored))
         item = TrashedItem(
@@ -189,6 +191,11 @@ class Trash:
 
 
 def _size_of(path: Path) -> int:
+    # A symlink first, because is_file() and is_dir() both follow it - so the
+    # preview for `rm shortcut.txt` quoted the size of the file at the far end,
+    # which is the one thing the delete does not touch.
+    if path.is_symlink():
+        return path.lstat().st_size
     if path.is_file():
         return path.stat().st_size
     if path.is_dir():
@@ -237,10 +244,16 @@ def parse_delete(command: str, cwd: Path) -> DeletePlan | None:
 
     recursive = False
     operands: list[str] = []
+    # POSIX: everything after `--` is an operand, however it starts. Without
+    # this, `rm -- -report.txt data.txt` dropped -report.txt as though it were a
+    # flag and then reported the delete as done - the one file the user needed
+    # `--` for was the one silently left behind.
+    end_of_flags = False
     for token in tokens[1:]:
-        if token == "--":
+        if not end_of_flags and token == "--":
+            end_of_flags = True
             continue
-        if token.startswith("-") and len(token) > 1:
+        if not end_of_flags and token.startswith("-") and len(token) > 1:
             if re.search(r"[rR]", token.lstrip("-")):
                 recursive = True
             continue
@@ -258,6 +271,21 @@ def parse_delete(command: str, cwd: Path) -> DeletePlan | None:
     return DeletePlan(command=text, paths=resolved, recursive=recursive)
 
 
+def locate(path: Path) -> Path:
+    """Absolute, normalised, and **not** through a final symlink.
+
+    ``resolve()`` follows the last component too, so ``rm shortcut.txt`` planned
+    a delete of whatever ``shortcut.txt`` pointed at. That is not what ``rm``
+    does - it removes the link and leaves the target alone - so rerouting
+    through the trash was quietly destroying a file the user had not named, and
+    the preview confirmed the wrong one. Parents are still resolved, which is
+    what keeps ``/tmp`` and ``/private/tmp`` from looking like two places.
+    """
+    if path.is_symlink():
+        return path.parent.resolve() / path.name
+    return path.resolve()
+
+
 def _expand(operand: str, cwd: Path) -> list[Path]:
     """Glob-expand one operand against ``cwd``, skipping what does not exist."""
     if any(ch in operand for ch in "*?["):
@@ -268,13 +296,24 @@ def _expand(operand: str, cwd: Path) -> list[Path]:
             else:
                 matches = sorted(cwd.glob(operand))
         except (ValueError, OSError):
-            return []
-        return [m.resolve() for m in matches]
+            matches = []
+        if matches:
+            return [locate(m) for m in matches]
+        # A glob that matched nothing may be a literal name that happens to
+        # contain glob characters. `file[1].txt` is an ordinary filename, and
+        # `[1]` is a character class that matches "1" rather than itself - so it
+        # matched nothing, the delete was never rerouted through the trash, and
+        # the preview fell back to echoing the command. Fall through and try the
+        # name as written.
 
     path = Path(operand)
     if not path.is_absolute():
         path = cwd / path
-    return [path.resolve()] if path.exists() else []
+    if not path.exists() and not path.is_symlink():
+        # is_symlink as well as exists: a link with nothing at the far end is
+        # still a thing `rm` removes, and exists() follows the link to answer.
+        return []
+    return [locate(path)]
 
 
 def describe(plan: DeletePlan, limit: int = 5) -> str:

@@ -297,3 +297,97 @@ def test_the_reported_size_is_measured_before_the_move(
     assert result.ok
     assert "0 B" not in result.output
     assert "4.0 KB" in result.output
+
+
+# --- the name the user typed, not the file at the far end -------------------
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating a symlink needs privilege on Windows")
+def test_deleting_a_symlink_leaves_its_target_alone(
+    tmp_path: Path, settings: Settings
+) -> None:
+    """`rm shortcut.txt` removes the link. It does not touch what it points at.
+
+    `_expand` and `Trash.store` both called `resolve()`, which follows the final
+    component - so rerouting the delete through the trash changed what the
+    command meant. The old code reported "Moved 1 item (13 B): important.txt",
+    left the link in place, and took the only copy of a file the user had not
+    named. This is the one bug in this module that destroys data the user was
+    not shown.
+    """
+    target = tmp_path / "important.txt"
+    target.write_text("the only copy", encoding="utf-8")
+    link = tmp_path / "shortcut.txt"
+    link.symlink_to(target)
+
+    trash = Trash(tmp_path / ".trash", "s1")
+    gate = SafetyInterceptor(confirmer=AutoConfirmer(True), trash=trash, cwd=tmp_path)
+    registry = build_registry(settings, cwd=tmp_path, interceptor=gate, trash=trash)
+
+    result = registry.run("shell", {"command": "rm shortcut.txt"})
+
+    assert result.ok, result.error
+    assert "shortcut.txt" in result.output
+    assert "important.txt" not in result.output
+    assert not link.is_symlink(), "the link itself was not removed"
+    assert target.read_text(encoding="utf-8") == "the only copy", "the target was destroyed"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating a symlink needs privilege on Windows")
+def test_a_restored_symlink_is_still_a_symlink(tmp_path: Path) -> None:
+    """Undo has to put back what was taken, which was a link and not a copy."""
+    target = tmp_path / "important.txt"
+    target.write_text("the only copy", encoding="utf-8")
+    link = tmp_path / "shortcut.txt"
+    link.symlink_to(target)
+
+    trash = Trash(tmp_path / ".trash", "s1")
+    item = trash.store(link)
+    assert not link.is_symlink()
+
+    Trash.restore(item)
+    assert link.is_symlink()
+    assert link.resolve() == target.resolve()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating a symlink needs privilege on Windows")
+def test_a_dangling_symlink_is_still_something_rm_removes(tmp_path: Path) -> None:
+    """`exists()` follows the link, so a broken one looked like nothing at all -
+    and the delete went out to the shell with no trash behind it."""
+    link = tmp_path / "broken.txt"
+    link.symlink_to(tmp_path / "never-existed.txt")
+
+    plan = parse_delete("rm broken.txt", tmp_path)
+
+    assert plan is not None, "a broken link was not recognised as a delete"
+    assert [p.name for p in plan.paths] == ["broken.txt"]
+
+
+def test_a_filename_containing_glob_characters_still_gets_a_trash(
+    tmp_path: Path,
+) -> None:
+    """`file[1].txt` is an ordinary filename; `[1]` is a character class that
+    matches "1" instead of itself. The glob found nothing, so the delete was
+    never rerouted - it went to the shell unbacked, and the preview gave up and
+    echoed the command back."""
+    awkward = tmp_path / "file[1].txt"
+    awkward.write_text("x" * 50, encoding="utf-8")
+
+    plan = parse_delete('rm "file[1].txt"', tmp_path)
+
+    assert plan is not None, "the delete was not recognised, so nothing backed it up"
+    assert [p.name for p in plan.paths] == ["file[1].txt"]
+    assert "file[1].txt" in describe(plan)
+
+
+def test_everything_after_a_double_dash_is_a_filename(tmp_path: Path) -> None:
+    """POSIX says so, and `--` is used for exactly this: a name starting with a
+    dash. It was dropped as a flag, so the file the user needed `--` for was the
+    one left behind - and the delete was still reported as done."""
+    (tmp_path / "-report.txt").write_text("x" * 50, encoding="utf-8")
+    (tmp_path / "data.txt").write_text("x" * 50, encoding="utf-8")
+
+    plan = parse_delete('rm -- "-report.txt" data.txt', tmp_path)
+
+    assert plan is not None
+    assert sorted(p.name for p in plan.paths) == ["-report.txt", "data.txt"]

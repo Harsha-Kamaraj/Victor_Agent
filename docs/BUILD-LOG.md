@@ -1795,3 +1795,56 @@ is deliberate and now says so — whatever the microphone did, the answer is to 
 in writing rather than to guess — and `KeyboardInterrupt` still gets out.
 
 **810 tests.**
+
+## `rm` on a symlink took the wrong file *(added after P8)*
+
+The awkward-filename pass. Four defects in the trash reroute, one of which
+destroys data the user was never shown.
+
+**The symlink.** Both `_expand` and `Trash.store` called `resolve()`, which
+follows the *final* component of a path as well as its parents. So `rm
+shortcut.txt` planned, previewed and executed a delete of whatever the link
+pointed at:
+
+```
+$ rm shortcut.txt
+Moved 1 item (13 B): important.txt to the trash.
+```
+
+The link was still there. `important.txt` was gone. Real `rm` removes the link
+and leaves the target alone, so rerouting through the trash did not merely add an
+undo — it **changed what the command meant**, and took the only copy of a file the
+user had not named. `locate()` now resolves parents but not a final symlink,
+which is what keeps `/tmp` and `/private/tmp` from looking like two places while
+leaving the last component alone. A symlink is also no longer measured or
+classified through its target: `is_dir()` and `is_file()` both follow one, so the
+preview had been quoting the size of the file the delete does not touch.
+
+**The broken symlink.** `exists()` follows the link too, so a dangling one looked
+like nothing at all and the delete went out to the shell with no trash behind it.
+`exists() or is_symlink()` now.
+
+**The literal glob character.** `file[1].txt` is an ordinary filename, and `[1]`
+is a character class matching `1` rather than itself — so the glob matched
+nothing, `parse_delete` returned `None`, and the delete ran raw: no trash, no
+undo, and a preview that gave up and echoed the command, which this module's own
+docstring calls worthless. A glob that matches nothing now falls through and
+tries the name as written.
+
+**`--`.** POSIX says everything after it is an operand, which is the entire point
+of typing it. `rm -- -report.txt data.txt` dropped `-report.txt` as a flag, moved
+only `data.txt`, and reported the delete as done — so the one file the user needed
+`--` for was the one silently left behind, and the report said otherwise.
+
+Found by asking the question that has been paying out all day: what kind of input
+does no test supply? Here it was filenames — spaces, apostrophes and non-ASCII all
+turned out fine, which is worth knowing too. Symlinks, glob characters and `--`
+did not.
+
+`.recursive` on `DeletePlan` is computed and never read anywhere, so the fact that
+`re.search(r"[rR]", ...)` sees an "r" in `--force` and `--verbose` and calls them
+recursive has no effect today. Left alone rather than fixed: changing dead code
+carries risk without benefit, and it is noted here so the next person to give it a
+meaning knows to fix the test first.
+
+**815 tests.** `victor selftest`: 12 passed, 0 failed, 0 API requests.
