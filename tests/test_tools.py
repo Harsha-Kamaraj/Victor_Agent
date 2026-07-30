@@ -31,7 +31,9 @@ def test_truncate_keeps_head_and_tail() -> None:
     text = "START" + ("x" * 10_000) + "END"
     out = truncate(text, 400)
 
-    assert len(out) <= 400 + 60
+    # The limit exactly, not the limit plus slack: the note's placeholder is
+    # wider than any number that replaces it, so the result cannot overshoot.
+    assert len(out) <= 400
     assert out.startswith("START")
     assert out.endswith("END")
     assert "omitted" in out
@@ -39,6 +41,18 @@ def test_truncate_keeps_head_and_tail() -> None:
 
 def test_truncate_leaves_short_output_alone() -> None:
     assert truncate("hello", 100) == "hello"
+
+
+@pytest.mark.parametrize("limit", [0, 1, 10, 41, 42, 43, 44, 100])
+def test_truncate_never_returns_more_than_it_was_asked_for(limit: int) -> None:
+    """A limit smaller than the note used to make the text *grow*.
+
+    ``keep`` went negative, so ``text[:-1] + note + text[1:]`` returned 432
+    characters for a 200-character input under a limit of 40. Nothing calls it
+    that way today, which is exactly why it survived: the defect was in the
+    input no test supplied.
+    """
+    assert len(truncate("A" * 100 + "B" * 100, limit)) <= limit
 
 
 def test_result_for_model_includes_exit_code_on_failure() -> None:

@@ -1151,8 +1151,11 @@ def _warm_embedder(memory) -> None:
     warm = getattr(memory.embedder, "warm", None)
     if warm is None:
         return
-    cached = any(memory.store.directory.parent.glob("models/**/*.onnx"))
-    if not cached:
+    # `models/**/*.onnx` also matched the piper voice, which sits as a bare
+    # .onnx in that directory - so anyone who ran `victor voice install` first,
+    # as the quickstart tells them to, was told nothing before a 130 MB
+    # download. The embedder knows what it needs; ask it.
+    if not getattr(memory.embedder, "installed", True):
         console.print(
             "[dim]first run: downloading the embedding model (~130 MB, once). "
             "It stays local and nothing is sent anywhere.[/dim]"
@@ -1579,7 +1582,11 @@ def bench(
     from .voice.tts import PiperSynthesizer
 
     settings = _settings()
-    synth = PiperSynthesizer(settings.paths.ensure().models_dir)
+    # Never download here. Measuring latency is not consent to fetch 63 MB, and
+    # behind a status spinner a slow download is indistinguishable from a slow
+    # machine - which is the opposite of what a benchmark is for. If the voice
+    # is missing, bench_pipeline reports the null backend and names the remedy.
+    synth = PiperSynthesizer(settings.paths.ensure().models_dir, auto_download=False)
     with console.status(f"benchmarking ({runs} runs)..."):
         results = bench_pipeline(settings, runs=runs, synthesizer=synth, stt=stt)
     console.print(summarise(results))

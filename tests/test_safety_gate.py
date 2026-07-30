@@ -679,6 +679,91 @@ def test_the_kill_switch_reaps_the_whole_process_tree(tmp_path: Path) -> None:
     assert not marker.exists(), "a grandchild process outlived the kill switch"
 
 
+# --- the wait loop has to read the pipe, not just watch the process ---------
+#
+# Every test above ran a command with almost no output, which is why the
+# deadlock these cover survived a green suite. A child that fills the pipe
+# buffer blocks on the write until somebody reads; a loop that only polls never
+# does, so the command looked hung and was reported as a timeout. It only
+# happened when a kill switch was wired - which is to say, only in real runs,
+# never in tests, because the no-switch branch called communicate().
+
+
+def _writer(tmp_path: Path, body: str) -> str:
+    """A command that writes a known amount and then does what ``body`` says."""
+    script = tmp_path / f"writer{abs(hash(body)) % 10000}.py"
+    script.write_text("import sys, time\n" + body, encoding="utf-8")
+    return _shell_invocation(sys.executable, "-u", str(script))
+
+
+@pytest.mark.parametrize("switched", [True, False])
+def test_output_past_the_pipe_buffer_is_not_mistaken_for_a_hang(
+    tmp_path: Path, switched: bool
+) -> None:
+    """300 KB is several times the 64 KiB buffer, and finishes in milliseconds.
+
+    Parametrised over the switch because the two branches used to be different
+    code: the one the suite exercised and the one that shipped.
+    """
+    command = _writer(tmp_path, "sys.stdout.write('y' * 300_000)\n")
+    tool = ShellTool(
+        cwd=tmp_path, timeout=10.0, kill_switch=KillSwitch() if switched else None
+    )
+
+    started = time.monotonic()
+    result = tool.run(command)
+    elapsed = time.monotonic() - started
+
+    assert result.ok, result.error
+    assert len(result.output) == 300_000, f"kept only {len(result.output)} bytes"
+    assert elapsed < 5.0, f"took {elapsed:.1f}s for a command that writes and exits"
+
+
+def test_both_pipes_are_drained_at_the_same_time(tmp_path: Path) -> None:
+    """Draining stdout alone still deadlocks on a full stderr."""
+    command = _writer(
+        tmp_path,
+        "sys.stderr.write('e' * 200_000)\nsys.stdout.write('o' * 200_000)\n",
+    )
+    result = ShellTool(cwd=tmp_path, timeout=10.0, kill_switch=KillSwitch()).run(command)
+
+    assert result.ok, result.error
+    assert len(result.output) == 200_000
+    assert result.error is not None and len(result.error) == 200_000
+
+
+def test_what_a_command_printed_before_being_stopped_survives(tmp_path: Path) -> None:
+    """The output is the reason you wanted to stop it, so it has to come back."""
+    command = _writer(tmp_path, "print('before the stop')\ntime.sleep(20)\n")
+    switch = KillSwitch()
+    tool = ShellTool(cwd=tmp_path, timeout=30.0, kill_switch=switch)
+
+    threading.Thread(
+        target=lambda: (time.sleep(0.4), switch.trip("test")), daemon=True
+    ).start()
+    result = tool.run(command)
+
+    assert result.metadata.get("aborted") is True
+    assert "before the stop" in result.output
+
+
+def test_a_timed_out_command_still_reports_its_own_diagnosis(tmp_path: Path) -> None:
+    """cmake, npm, gradle and javac all report on stderr and nothing to stdout.
+
+    Dropping it left the model with "timed out after 30s" and no output at all -
+    the single line explaining the hang was the line discarded.
+    """
+    command = _writer(
+        tmp_path, "sys.stderr.write('FATAL: missing header foo.h\\n')\ntime.sleep(30)\n"
+    )
+    result = ShellTool(cwd=tmp_path, timeout=1.0, kill_switch=KillSwitch()).run(command)
+
+    assert result.metadata.get("timeout") == 1.0
+    assert result.error is not None
+    assert "timed out after 1s" in result.error
+    assert "FATAL: missing header foo.h" in result.error
+
+
 def test_the_spoken_prompt_is_punctuated_into_sentences(tmp_path: Path) -> None:
     """Piper emits one chunk per sentence, so full stops are what let a long
     prompt start playing before it has finished generating."""

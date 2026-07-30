@@ -166,7 +166,10 @@ def bench_pipeline(
     """Everything measurable on this machine, in one pass."""
     results = [bench_vad(runs=max(runs, 3))]
 
-    synth = synthesizer or PiperSynthesizer(settings.paths.models_dir)
+    # auto_download=False on purpose: a benchmark that fetches 63 MB is timing
+    # the network, not the machine, and the download has no timeout to fall back
+    # from - a stalled one hangs here indefinitely rather than raising.
+    synth = synthesizer or PiperSynthesizer(settings.paths.models_dir, auto_download=False)
     try:
         results.append(bench_tts_warmup(synth))
         results.extend(bench_tts(synth, runs=runs, text=SAMPLE_TEXT, label="1 sentence"))
@@ -175,7 +178,9 @@ def bench_pipeline(
         )
     except Exception as exc:
         fallback = NullSynthesizer()
-        note = f"piper unavailable ({type(exc).__name__}) - measured with the null backend"
+        # The message, not just the type: VoiceModelMissing already names the
+        # command that fixes it, and "(VoiceModelMissing)" alone does not.
+        note = f"piper unavailable - {exc} - measured with the null backend"
         for m in bench_tts(fallback, runs=runs):
             m.note = note
             results.append(m)

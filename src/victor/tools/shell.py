@@ -13,14 +13,16 @@ for the real thing.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import platform
 import re
 import signal
 import subprocess
+import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 from .base import ToolResult, ToolSpec
 
@@ -28,6 +30,12 @@ DEFAULT_TIMEOUT = 30.0
 MAX_TIMEOUT = 300.0
 POLL_INTERVAL = 0.05
 """How often the wait loop checks the kill switch. Bounds abort latency."""
+
+READ_SIZE = 8192
+"""Chunk size for draining a child's pipes."""
+
+REAP_GRACE = 2.0
+"""Seconds a process gets to die politely before it is killed."""
 
 #: Targets whose recursive deletion cannot be recovered from and is never a
 #: legitimate instruction: the filesystem root, the whole home directory, a
@@ -235,18 +243,18 @@ class ShellTool:
         except OSError as exc:
             return ToolResult(ok=False, error=f"could not run: {exc}")
 
-        stdout, stderr, status = self._wait(process, limit, command)
+        stdout, stderr, status = self._wait(process, limit)
         if status == "aborted":
             return ToolResult(
                 ok=False,
-                error="stopped by the kill switch",
+                error=_and_what_it_said("stopped by the kill switch", stderr),
                 output=stdout,
                 metadata={"command": command, "aborted": True},
             )
         if status == "timeout":
             return ToolResult(
                 ok=False,
-                error=f"timed out after {limit:.0f}s",
+                error=_and_what_it_said(f"timed out after {limit:.0f}s", stderr),
                 output=stdout,
                 metadata={"command": command, "timeout": limit},
             )
@@ -305,36 +313,41 @@ class ShellTool:
             },
         )
 
-    def _wait(
-        self, process: subprocess.Popen, limit: float, command: str
-    ) -> tuple[str, str, str]:
+    def _wait(self, process: subprocess.Popen, limit: float) -> tuple[str, str, str]:
         """Wait for the process, checking the kill switch as we go.
 
         Without the poll loop, aborting a run would still have to wait out
         whatever the command felt like doing. Abort latency is bounded by the
         poll interval instead of by the command.
+
+        One loop, not two. An earlier version called ``communicate()`` when no
+        kill switch was wired and polled when one was - so every test took the
+        first branch and every real run took the second, because the CLI always
+        wires a switch. The deadlock the drains below exist to prevent therefore
+        lived in the only code that ever shipped, behind a green suite. Whether
+        a switch is present is now the sole difference between the two.
         """
-        if self.kill_switch is None:
-            try:
-                stdout, stderr = process.communicate(timeout=limit)
-                return stdout, stderr, "ok"
-            except subprocess.TimeoutExpired:
-                process.kill()
-                stdout, stderr = process.communicate()
-                return stdout, stderr, "timeout"
-
+        out = _Drain(process.stdout)
+        err = _Drain(process.stderr)
+        switch = self.kill_switch
         deadline = time.monotonic() + limit
-        while process.poll() is None:
-            if self.kill_switch.tripped:
-                stdout, stderr = _reap(process)
-                return stdout, stderr, "aborted"
-            if time.monotonic() > deadline:
-                stdout, stderr = _reap(process)
-                return stdout, stderr, "timeout"
-            time.sleep(POLL_INTERVAL)
 
-        stdout, stderr = process.communicate()
-        return stdout, stderr, "ok"
+        while True:
+            if switch is not None and switch.tripped:
+                _reap(process, out, err)
+                return out.collect(), err.collect(), "aborted"
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _reap(process, out, err)
+                return out.collect(), err.collect(), "timeout"
+            try:
+                # Returns the moment the child exits, so the poll interval is a
+                # ceiling on how late the switch is noticed, not a floor on how
+                # long a fast command takes.
+                process.wait(timeout=min(POLL_INTERVAL, remaining))
+            except subprocess.TimeoutExpired:
+                continue
+            return out.collect(), err.collect(), "ok"
 
 
 class ReadFileTool:
@@ -398,12 +411,84 @@ def _process_group_kwargs() -> dict[str, Any]:
     return {"start_new_session": True}
 
 
-def _reap(process: subprocess.Popen, grace: float = 2.0) -> tuple[str, str]:
+def _and_what_it_said(reason: str, stderr: str) -> str:
+    """Keep what the command said about itself before it was cut off.
+
+    Both of these paths reported only why *we* stopped and dropped the command's
+    stderr. Most build tools - cmake, npm, gradle, javac - write their
+    diagnostics there and nothing to stdout, so a run that printed
+    ``FATAL: missing header foo.h`` and then hung reached the model as
+    ``timed out after 30s`` with no output at all: the one line that explained
+    the hang was the line thrown away. No limit is needed here because
+    ``ToolResult.for_model`` truncates the reason and the output together.
+    """
+    said = stderr.strip()
+    return f"{reason}\n{said}" if said else reason
+
+
+class _Drain:
+    """Empties one of a child's pipes on a thread of its own.
+
+    The wait loop cannot call ``communicate()``: that blocks until the child
+    exits, which is the one thing the loop exists to avoid. But a loop that only
+    polls never empties the pipe, and a child that fills the buffer - 64 KiB on
+    macOS - blocks on the write until somebody reads. The command then looks
+    like it hung: measured here, ``python -c "sys.stdout.write('y'*300000)"``
+    sat until the 6-second timeout and came back with exactly 65,536 bytes and
+    a failure, having actually finished its work in 54 ms. Any build or test run
+    worth watching clears 64 KiB, so this was not an edge case.
+
+    So the reading has to happen while the loop is still looping.
+    """
+
+    def __init__(self, stream: IO[str] | None) -> None:
+        self._chunks: list[str] = []
+        self._stream = stream
+        self._thread = threading.Thread(target=self._read, daemon=True)
+        self._thread.start()
+
+    def _read(self) -> None:
+        if self._stream is None:
+            return
+        try:
+            while True:
+                chunk = self._stream.read(READ_SIZE)
+                if not chunk:
+                    break
+                self._chunks.append(chunk)
+        except (OSError, ValueError):
+            # The pipe was closed under us. Whatever arrived first still counts.
+            pass
+        finally:
+            # Nobody calls communicate() any more, so closing is ours to do.
+            # An inherited handle left open is what stops Windows deleting a
+            # file it is holding.
+            with contextlib.suppress(Exception):
+                self._stream.close()
+
+    def settle(self, timeout: float) -> bool:
+        """Wait for end-of-file. False if something is still holding the pipe."""
+        self._thread.join(timeout)
+        return not self._thread.is_alive()
+
+    def collect(self, timeout: float = REAP_GRACE) -> str:
+        self.settle(timeout)
+        return "".join(self._chunks)
+
+
+def _reap(process: subprocess.Popen, *pipes: _Drain, grace: float = REAP_GRACE) -> None:
     """Terminate a process and everything it spawned.
 
     Signals the whole group so a shell that launched children does not leave
     them running. Escalates to SIGKILL if the group ignores the polite signal,
     because a kill switch that can be declined is not a kill switch.
+
+    An unclosed pipe is the evidence for "ignored it". The shell itself may die
+    on SIGTERM while a grandchild that inherited its stdout keeps running and
+    keeps the write end open; waiting on the process alone would call that a
+    clean exit and walk away from the grandchild. The old code got this right by
+    accident, because ``communicate()`` waits on the pipes rather than the
+    process - dropping it for a plain ``wait()`` would have silently lost it.
     """
     try:
         if platform.system() == "Windows":
@@ -417,10 +502,8 @@ def _reap(process: subprocess.Popen, grace: float = 2.0) -> tuple[str, str]:
     except (OSError, subprocess.SubprocessError):
         process.terminate()
 
-    try:
-        return process.communicate(timeout=grace)
-    except subprocess.TimeoutExpired:
-        pass
+    if _settled(process, pipes, grace):
+        return
 
     try:
         if platform.system() != "Windows":
@@ -430,10 +513,17 @@ def _reap(process: subprocess.Popen, grace: float = 2.0) -> tuple[str, str]:
     except OSError:
         process.kill()
 
+    _settled(process, pipes, grace)
+
+
+def _settled(process: subprocess.Popen, pipes: tuple[_Drain, ...], grace: float) -> bool:
+    """True once the process has exited and nothing is holding its pipes."""
+    deadline = time.monotonic() + grace
     try:
-        return process.communicate(timeout=grace)
+        process.wait(timeout=grace)
     except subprocess.TimeoutExpired:
-        return "", "process did not exit after SIGKILL"
+        return False
+    return all(pipe.settle(max(0.0, deadline - time.monotonic())) for pipe in pipes)
 
 
 def describe_environment(cwd: Path | None = None) -> dict[str, Any]:

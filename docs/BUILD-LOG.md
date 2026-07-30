@@ -1577,3 +1577,114 @@ the truth. The lesson is the same one the Windows passes keep teaching: the gap
 is never in the logic you examined, it is in the input you never supplied.
 
 **765 tests.**
+
+## The suite was not offline *(added after P8)*
+
+The hunt continued into the shell tool, and coverage pointed at `_wait` — the
+poll loop that bounds abort latency. The bug was not in the loop's logic but in
+what no test had ever handed it: **output**.
+
+`Popen` with `stdout=PIPE` and a loop that only calls `poll()` never empties the
+pipe. A child that fills the buffer — 64 KiB on macOS — blocks on the write and
+never exits, so the loop spins to the deadline and reports a timeout for a
+command that had already finished its work. Measured: 300 KB of stdout came back
+as `ok=False`, `6013ms`, **exactly 65,536 bytes**. Without a kill switch the same
+command took 54 ms and returned all 300 KB.
+
+That asymmetry is the interesting part. The two branches were different code:
+
+```python
+if self.kill_switch is None:
+    stdout, stderr = process.communicate(timeout=limit)   # every test
+...
+while process.poll() is None:                             # every real run
+```
+
+The CLI always wires a kill switch. So the deadlock lived exclusively in the
+branch that shipped, behind a suite that was green because it only ever took the
+other one. Any build or test run worth watching clears 64 KiB.
+
+The fix drains both pipes on their own threads while the loop keeps polling, and
+collapses the two branches into one — the presence of a switch is now the only
+difference between them. Two things fell out of it. `process.wait(timeout=...)`
+replaced `sleep(POLL_INTERVAL)`, so a fast command returns immediately rather
+than sleeping out the interval: `echo hello` went from 58 ms to 11 ms. And the
+old `communicate()` in the "ok" path had **no timeout at all**, so a surviving
+grandchild holding the pipe would have hung the tool forever.
+
+`_reap` needed care for the same reason. It escalates to `SIGKILL` when the
+polite signal is ignored, and it decided "ignored" from `communicate()` timing
+out — which waits on the *pipes*, not the process. The shell can die on `SIGTERM`
+while a grandchild that inherited its stdout keeps running and keeps the write
+end open. Swapping in a plain `wait()` would have called that a clean exit and
+walked away from the grandchild; the old code was right by accident. The
+condition is now explicit: exited **and** nothing still holding a pipe.
+
+Also fixed alongside: both the abort and timeout paths discarded the command's
+stderr. cmake, npm, gradle and javac all report diagnostics there and print
+nothing to stdout, so a run that printed `FATAL: missing header foo.h` and then
+hung reached the model as `timed out after 30s` with no output whatsoever — the
+one line explaining the hang was the line thrown away.
+
+### 53 minutes in a TLS read
+
+Then the suite itself hung. Not slowly — 53 minutes at 0.1% CPU, with 0.82
+seconds of accumulated user time, which says it stopped almost immediately and
+never resumed. `sample` on the process put the main thread in
+`_ssl__SSLSocket_read`: a **real network connection**, in a suite whose entire
+network story is `httpx.MockTransport`.
+
+It stopped after exactly 59 dots. Test 60 was `test_bench_takes_a_voice_flag`,
+which invokes `victor bench --voice` against a temporary data directory. `bench`
+built its synthesizer with the default `auto_download=True`, so a unit test
+fetched a 63 MB voice model from HuggingFace. The same shape turned up in
+`selftest`'s P6 gate, which pointed fastembed's `cache_dir` at a fresh temporary
+directory and pulled 130 MB — inside the gate whose claim is *"recalled with no
+API call"*.
+
+Both were wrapped in `except Exception` fallbacks. Neither fired, because **a
+stall is not an exception**. The download has no timeout to fail over from.
+
+None of this failed. That is why it survived: ~193 MB per run, a suite whose
+runtime tracked the network, and one day a hang. The tell was there to be read
+in the wall clock and nobody read it.
+
+Three fixes, in increasing order of what they prevent:
+
+1. `bench` and `bench_pipeline` pass `auto_download=False`. Measuring latency is
+   not consent to fetch 63 MB, and behind a status spinner a slow download is
+   indistinguishable from a slow machine — the opposite of what a benchmark is
+   for. The note now carries the exception's *message*, since
+   `VoiceModelMissing` already names the command that fixes it and
+   `(VoiceModelMissing)` does not.
+2. `select_embedder(..., auto_download=False)` restricts the choice to what is
+   already on disk, so the P6 gate uses the hash embedder rather than fetching
+   the semantic one. The gate's detail already named the embedder, so a lexical
+   score can never be read as a semantic one. Detecting "already on disk" needs
+   a glob for `models--*/snapshots/*/*.onnx`, because fastembed resolves
+   `BAAI/bge-small-en-v1.5` to a quantised mirror named after `qdrant/…`. The
+   looser `models/**/*.onnx` that `_warm_embedder` had been using also matched
+   the *piper* voice — a bare `.onnx` in the same directory — so the "downloading
+   130 MB" notice was suppressed for exactly the users who follow the quickstart
+   and install the voice first.
+3. An autouse fixture in `conftest.py` refuses any socket connection that is not
+   loopback. This is the one that matters: it converts "the suite is offline"
+   from a convention that holds as long as the last person remembered it into a
+   property that is checked on every test. `@pytest.mark.network` is the escape
+   hatch; nothing uses it, because live checks belong in `victor selftest --live`,
+   which a person runs deliberately.
+
+**The suite went from 500–1800 seconds, and sometimes never, to 13.4 seconds.**
+`victor bench --voice` on a machine with no voice went from a silent 63 MB
+download to 0.22 seconds and the sentence `Run: victor voice install`.
+`victor selftest`: 12 passed, 0 failed, P6 recalling at 0.96 in 7 ms on
+fastembed, 0 API requests.
+
+A latent one found on the way past: `truncate()` returned **more** than its
+limit when the limit was smaller than the note it inserts — `keep` went
+negative, so `text[:-1] + note + text[1:]` grew a 200-character input to 432
+under a limit of 40. Unreachable today, since every caller uses the default;
+fixed because a function whose whole contract is "fits within limit" must not
+return ten times it.
+
+**785 tests.**

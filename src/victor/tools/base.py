@@ -89,6 +89,14 @@ def truncate(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
     if len(text) <= limit:
         return text
     keep = (limit - len(TRUNCATION_NOTE)) // 2
+    if keep <= 0:
+        # A limit too small to hold the note has no room to explain the cut.
+        # Without this the arithmetic went negative and `text[:-1] + note +
+        # text[1:]` *grew* the input: 200 characters came back as 432 under a
+        # limit of 40. Latent rather than live - every caller passes the default
+        # - but a function whose whole contract is "fits within limit" must not
+        # return ten times it.
+        return text[:limit] if limit > 0 else ""
     dropped = len(text) - 2 * keep
     return text[:keep] + TRUNCATION_NOTE.format(dropped=dropped) + text[-keep:]
 

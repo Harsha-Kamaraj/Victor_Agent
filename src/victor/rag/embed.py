@@ -79,6 +79,26 @@ class FastEmbedEmbedder:
         self.cache_dir = cache_dir
         self._model: Any = None
 
+    @property
+    def installed(self) -> bool:
+        """True when the ONNX file is on disk, so loading needs no network.
+
+        A glob rather than a path built from :data:`MODEL_NAME`, because
+        fastembed resolves ``BAAI/bge-small-en-v1.5`` to a quantised mirror
+        (``qdrant/bge-small-en-v1.5-onnx-q``) and the directory is named after
+        the mirror. The ``models--*/snapshots/`` shape also keeps this from
+        matching the piper voice, which is a bare ``.onnx`` in the same
+        directory - a looser glob answered "cached" for anyone who had installed
+        the voice, and so suppressed the 130 MB download notice for exactly the
+        users who follow the quickstart in order.
+
+        With no ``cache_dir`` the model lives in fastembed's own cache, which is
+        not ours to inspect, so the honest answer is no.
+        """
+        if self.cache_dir is None:
+            return False
+        return any(self.cache_dir.glob("models--*/snapshots/*/*.onnx"))
+
     def _load(self) -> Any:
         if self._model is not None:
             return self._model
@@ -151,12 +171,23 @@ class HashEmbedder:
         return normalise(vector)
 
 
-def select_embedder(cache_dir: Path | None = None) -> Embedder:
-    """The best embedder available here, preferring meaning over vocabulary."""
+def select_embedder(cache_dir: Path | None = None, *, auto_download: bool = True) -> Embedder:
+    """The best embedder available here, preferring meaning over vocabulary.
+
+    ``auto_download=False`` restricts the choice to what is already on disk.
+    Fetching 130 MB is right when someone asked for memory and wrong when
+    something merely *checks* memory: ``victor selftest`` pointed the cache at a
+    fresh temporary directory, so it downloaded the model on every run - inside
+    the gate whose claim is "0 API calls" - and the test suite inherited it. The
+    fetch has no timeout to fall back from either, so a stalled connection hung
+    rather than failing over to the hash embedder.
+    """
     from importlib.util import find_spec
 
     if find_spec("fastembed") is not None:
-        return FastEmbedEmbedder(cache_dir)
+        candidate = FastEmbedEmbedder(cache_dir)
+        if auto_download or candidate.installed:
+            return candidate
     return HashEmbedder()
 
 

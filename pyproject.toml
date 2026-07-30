@@ -86,6 +86,11 @@ addopts = "-q"
 # Import from src/ directly rather than via the installed package, so the
 # suite runs even when an editable install is stale or broken.
 pythonpath = ["src"]
+markers = [
+    # Declared so `--strict-markers` stays usable and so a typo in the marker
+    # cannot silently grant a test the internet it is being denied.
+    "network: needs real network access; exempt from the offline guard in conftest",
+]
 
 [tool.ruff]
 line-length = 100

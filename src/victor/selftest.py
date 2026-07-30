@@ -446,7 +446,11 @@ def _p6_memory(settings: Settings) -> tuple[Status, str]:
     )
 
     with TemporaryDirectory() as tmp:
-        embedder = select_embedder(settings.paths.ensure().models_dir)
+        # What is on disk, never a download. The claim under test is the capture
+        # rule and the recall, which the hash embedder exercises end to end; the
+        # detail names whichever one produced the score so a lexical number is
+        # never read as a semantic one.
+        embedder = select_embedder(settings.paths.ensure().models_dir, auto_download=False)
         store = VectorStore(
             Path(tmp) / "memory",
             embedder_name=embedder.name,

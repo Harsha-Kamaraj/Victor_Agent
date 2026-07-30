@@ -585,3 +585,61 @@ def test_a_call_that_never_ran_is_not_remembered(memory: Memory, settings, metad
 
     assert watcher.outstanding == []
     assert agent.recalled == 0
+
+
+# --- choosing an embedder without paying for one --------------------------
+#
+# `select_embedder` used to answer "fastembed, if it is importable", which is
+# not the same question as "fastembed, if it is usable here". Pointed at a fresh
+# cache it downloaded 130 MB - and `victor selftest` pointed it at a temporary
+# directory, so the gate claiming "0 API calls" fetched a model on every run and
+# the suite inherited that. A download has no timeout to fail over from, so a
+# stalled one hung instead of falling back.
+
+
+def test_a_bare_onnx_file_is_not_the_embedding_model(tmp_path: Path) -> None:
+    """The piper voice is a bare ``.onnx`` in the same directory.
+
+    A `models/**/*.onnx` glob matched it, so anyone who had run
+    `victor voice install` - which the quickstart tells them to do first - was
+    told nothing before a 130 MB download.
+    """
+    from victor.rag.embed import FastEmbedEmbedder
+
+    (tmp_path / "en_US-lessac-medium.onnx").write_bytes(b"not an embedder")
+    assert not FastEmbedEmbedder(tmp_path).installed
+
+
+def test_a_downloaded_model_is_recognised(tmp_path: Path) -> None:
+    """fastembed names the directory after the quantised mirror it really
+    fetches, not after ``BAAI/bge-small-en-v1.5``."""
+    from victor.rag.embed import FastEmbedEmbedder
+
+    snapshot = tmp_path / "models--qdrant--bge-small-en-v1.5-onnx-q" / "snapshots" / "abc123"
+    snapshot.mkdir(parents=True)
+    (snapshot / "model_optimized.onnx").write_bytes(b"weights")
+
+    assert FastEmbedEmbedder(tmp_path).installed
+
+
+def test_declining_a_download_falls_back_instead_of_fetching(tmp_path: Path) -> None:
+    """``auto_download=False`` must never reach the network, whether or not
+    fastembed is importable on this machine."""
+    from victor.rag.embed import select_embedder
+
+    assert select_embedder(tmp_path, auto_download=False).name == "hash"
+
+
+def test_a_cached_model_is_still_preferred_when_downloads_are_declined(
+    tmp_path: Path,
+) -> None:
+    """Declining the download must not mean declining the good embedder - the
+    point is to skip the fetch, not to degrade a machine that already has it."""
+    pytest.importorskip("fastembed")
+    from victor.rag.embed import select_embedder
+
+    snapshot = tmp_path / "models--qdrant--bge-small-en-v1.5-onnx-q" / "snapshots" / "abc123"
+    snapshot.mkdir(parents=True)
+    (snapshot / "model_optimized.onnx").write_bytes(b"weights")
+
+    assert select_embedder(tmp_path, auto_download=False).name == "fastembed"

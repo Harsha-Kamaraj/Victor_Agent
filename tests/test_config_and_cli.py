@@ -146,3 +146,56 @@ def test_cli_quota_and_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     result = runner.invoke(app, ["route", "text"])
     assert result.exit_code == 0
     assert "gpt-oss-120b" in result.output
+
+
+# --- the suite's own guardrails -------------------------------------------
+
+
+def test_the_suite_refuses_real_network_access() -> None:
+    """The offline guard in conftest, checked rather than assumed.
+
+    Without this, deleting the fixture would make 778 tests quietly start
+    reaching the internet again - which is how a 63 MB voice download and a
+    130 MB embedding download lived inside unit tests for weeks. Both passed, so
+    nothing said so; the tell was a suite whose runtime tracked the network and
+    which one day hung for 53 minutes inside a TLS read.
+    """
+    import socket
+
+    # An IP literal from TEST-NET-1, which is reserved for documentation: no DNS
+    # lookup to make this test itself reach the network, and nothing real at the
+    # other end if the guard is ever removed. A hostname here would raise
+    # gaierror on a machine that is genuinely offline, and the test would then
+    # fail for the opposite of the reason it exists.
+    with pytest.raises(OSError, match="offline"):
+        socket.create_connection(("192.0.2.1", 443), timeout=5)
+
+
+def test_loopback_is_still_allowed() -> None:
+    """A test that binds its own server must keep working - the guard is aimed
+    at the internet, not at sockets."""
+    import socket
+
+    with socket.socket() as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        with socket.create_connection(server.getsockname(), timeout=5) as client:
+            assert client.getpeername()[0] == "127.0.0.1"
+
+
+def test_bench_reports_the_missing_voice_instead_of_downloading_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`victor bench` built a synthesizer with auto_download=True, so measuring
+    latency fetched 63 MB behind a status spinner - where a slow download is
+    indistinguishable from a slow machine, which is the opposite of what a
+    benchmark is for. The remedy has to be named, not just the failure.
+    """
+    pytest.importorskip("numpy")
+    monkeypatch.setenv("VICTOR_DATA_DIR", str(tmp_path))
+
+    result = runner.invoke(app, ["bench", "--voice", "--runs", "1"])
+
+    assert result.exit_code == 0, result.output
+    assert "vad endpointing" in result.output
+    assert "victor voice install" in result.output
