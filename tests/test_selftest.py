@@ -83,6 +83,45 @@ def test_an_unavailable_capability_skips_rather_than_passes(
     assert "install" in gate.detail
 
 
+def test_the_gates_close_what_they_open(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POSIX lets you unlink an open file; Windows raises WinError 32. The P6
+    and P8 gates each built a store or a trace inside a TemporaryDirectory and
+    left it open, so both passed every assertion and then died in cleanup - on
+    Windows only, which is the worst shape a bug can have.
+
+    Asserting the close happens, rather than asserting the cleanup succeeds,
+    because the latter passes on macOS whatever the code does. This test has to
+    be able to fail on the machine where the bug cannot reproduce.
+    """
+    from victor import selftest as module
+    from victor.rag.store import VectorStore
+    from victor.tracing import Trace
+
+    closed: list[str] = []
+
+    def spy_on(cls, name: str) -> None:
+        original = cls.close
+
+        def close(self, *args, **kwargs):
+            closed.append(name)
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(cls, "close", close)
+
+    spy_on(VectorStore, "store")
+    spy_on(Trace, "trace")
+
+    memory_gate = module._p6_memory(settings)
+    tracing_gate = module._p8_tracing(settings)
+
+    assert memory_gate.status is Status.OK, memory_gate.detail
+    assert tracing_gate.status is Status.OK, tracing_gate.detail
+    assert "store" in closed, "the P6 gate left its vector store open"
+    assert "trace" in closed, "the P8 gate left its trace file open"
+
+
 def test_a_missing_key_skips_rather_than_fails(tmp_path: Path) -> None:
     """CI has no keys and a fresh clone has no keys. Both used to report FAIL
     on the routing and voice gates - "not configured here" dressed up as

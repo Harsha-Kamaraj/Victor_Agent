@@ -378,9 +378,41 @@ def executable_label(label: str) -> str:
     return suffix if suffix in EXECUTABLE_SUFFIXES else ""
 
 
+#: Control types that are a file in a list rather than a control in a window.
+#: Clicking one of these in a file manager runs or opens whatever it names.
+FILE_ITEM_TYPES = frozenset({"ListItem", "TreeItem", "DataItem"})
+
+#: Processes where a list item is a file. Not a general "is this a file manager"
+#: test - just the shells whose items launch on activation.
+FILE_MANAGERS = frozenset({"explorer.exe", "explorer", "finder"})
+
+
+def _is_file_item(arguments: dict) -> bool:
+    """Is this click on a file in a file manager, rather than a control?
+
+    Both halves are required. A ListItem in a mail client is a message, and
+    confirming every one of those would train people to say yes without reading
+    - which costs more safety than it buys.
+    """
+    control_type = str(arguments.get("control_type", "")).strip()
+    process = str(arguments.get("process", "")).strip().casefold()
+    if not control_type or not process:
+        return False
+    return control_type in FILE_ITEM_TYPES and process in FILE_MANAGERS
+
+
 def classify_click(arguments: dict) -> Classification:
-    """Classify a click by what its label says it does."""
+    """Classify a click by what it will actually do.
+
+    ``label`` is what the model was shown. ``filename``, when the tool supplies
+    it, is what the element actually points at - and the two differ on Windows,
+    where Explorer strips known extensions from the name it reports. Preferring
+    the filename is the whole reason this function is not a one-liner over the
+    label: an installer whose label reads ``setup`` must not be graded the same
+    as a button that happens to say ``setup``.
+    """
     label = str(arguments.get("label", "")).strip()
+    filename = str(arguments.get("filename", "")).strip()
     index = arguments.get("index")
     target = f"element {index} ({label!r})" if label else f"element {index}"
 
@@ -392,12 +424,28 @@ def classify_click(arguments: dict) -> Classification:
         # asking about the wrong action.
         return Classification(Risk.SAFE, "opens a context menu")
 
-    suffix = executable_label(label)
+    # The real filename first, then the label. On Windows the label is the
+    # extension-stripped display name and cannot answer this question at all.
+    named = filename or label
+    suffix = executable_label(named)
     if suffix:
         return Classification(
             Risk.CONFIRM,
-            f"{label} is a .{suffix} - clicking it in a file manager runs it, "
+            f"{named} is a .{suffix} - clicking it in a file manager runs it, "
             "and nothing here can read what it does",
+            target,
+        )
+
+    if not filename and _is_file_item(arguments):
+        # A file in a file manager whose extension nobody can see. Activating it
+        # runs whatever it is, and "probably a document" is not a safety
+        # argument - the cost of asking is one prompt, the cost of guessing
+        # wrong is an unknown binary. Supplying the filename returns this to the
+        # ordinary rule above, where a .txt stays silent.
+        return Classification(
+            Risk.CONFIRM,
+            f"{label or 'this item'} is a file and its extension is hidden, "
+            "so there is no way to tell a document from a program",
             target,
         )
 

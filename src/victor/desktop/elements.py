@@ -17,8 +17,24 @@ and actuation stack testable on a machine that has no UI Automation at all.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
+
+#: A filename with an extension, allowing a leading path so a UIA value holding
+#: a full path still yields the basename. Spaces are allowed in the stem because
+#: real files have them.
+_FILENAME_LIKE = re.compile(
+    r"^(?:.*[\\/])?(?P<stem>[^\\/:*?\"<>|]+)\.(?P<suffix>[A-Za-z0-9]{1,8})$"
+)
+
+
+def _split_filename(candidate: str | None) -> tuple[str, str]:
+    """``(stem, suffix)`` if ``candidate`` reads like a filename, else ``("", "")``."""
+    match = _FILENAME_LIKE.match((candidate or "").strip())
+    if match is None:
+        return "", ""
+    return match.group("stem"), match.group("suffix").lower()
 
 #: Control types worth showing an agent. A window contains hundreds of panes,
 #: groups and static text; listing them all buries the six things you can act
@@ -108,6 +124,33 @@ class Element:
     def label(self) -> str:
         """The best available human name for this element."""
         return self.name or self.value or self.automation_id or f"<{self.control_type}>"
+
+    @property
+    def filename(self) -> str:
+        """The real filename behind this element, if any property carries one.
+
+        Windows Explorer hides known extensions by default - ``HideFileExt`` is
+        1 on a stock install - so the accessibility *name* of ``setup.exe`` is
+        just ``setup``. That is the label the safety layer was classifying, and
+        it is why a rule written to catch executable clicks never fired on the
+        platform it was written for.
+
+        UIA usually still knows the whole name, in the value or the automation
+        id. This looks for a candidate that reads like a filename and whose
+        stem matches the display name, which is strong evidence it is the same
+        file with the extension put back rather than an unrelated string.
+
+        Empty when nothing carries one - including on macOS, where Finder does
+        not hide extensions this way and ``name`` already has it.
+        """
+        display = (self.name or "").strip().casefold()
+        for candidate in (self.name, self.value, self.automation_id):
+            stem, suffix = _split_filename(candidate)
+            if not suffix:
+                continue
+            if not display or stem.casefold() == display or candidate.strip() == self.name.strip():
+                return f"{stem}.{suffix}"
+        return ""
 
     def render(self) -> str:
         """The line the model sees.

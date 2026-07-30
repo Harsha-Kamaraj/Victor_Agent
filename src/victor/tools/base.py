@@ -207,7 +207,25 @@ class ToolRegistry:
                 error=f"no such tool {name!r}. Available: {', '.join(self.names)}",
             )
 
-        review = self.interceptor.review(tool.spec, arguments)
+        # Let a tool add what it knows before the verdict, and only for the
+        # verdict - the tool still runs on exactly the arguments the model sent.
+        #
+        # This exists because of a real hole. Clicks are classified by their
+        # label, and Windows Explorer hides known extensions, so `setup.exe`
+        # arrives as `setup` and the rule that would have asked never fired.
+        # The tool can resolve what the label actually points at; the model
+        # cannot be relied on to pass it, and the classifier has no way to look.
+        facts = arguments
+        describe = getattr(tool, "describe", None)
+        if callable(describe):
+            try:
+                extra = describe(arguments)
+            except Exception:  # noqa: BLE001 - enrichment must never block a call
+                extra = None
+            if extra:
+                facts = {**arguments, **extra}
+
+        review = self.interceptor.review(tool.spec, facts)
         if review.blocked:
             return ToolResult(
                 ok=False,

@@ -356,7 +356,131 @@ def test_a_filename_with_spaces_is_still_a_filename():
     assert executable_label("Version 2.0") == ""
 
 
-def test_a_right_click_opens_a_menu_rather_than_doing_what_the_label_says():
+# --- Windows hides the extension the whole rule depends on ------------------
+#
+# Measured on a stock Windows 11: HideFileExt is 1, so Explorer's accessibility
+# name for setup.exe is "setup". Every test above passes a label with an
+# extension, which is a label Windows never supplies - so the rule was correct,
+# fully tested, and never fired on the platform it was written for.
+
+
+def test_the_real_filename_beats_the_stripped_label():
+    """The label is what the model was shown; the filename is what it points
+    at. On Windows those differ, and only one of them can answer the question."""
+    verdict = classify(
+        "click",
+        {"index": 4, "label": "setup", "filename": "setup.exe"},
+        mutating=True,
+    )
+    assert verdict.risk is Risk.CONFIRM
+    assert "setup.exe is a .exe" in verdict.reason
+
+
+def test_a_document_stays_silent_when_the_filename_is_known():
+    """The position agreed with Gagan: a .txt click must not nag."""
+    verdict = classify(
+        "click",
+        {
+            "index": 4,
+            "label": "notes",
+            "filename": "notes.txt",
+            "control_type": "ListItem",
+            "process": "explorer.exe",
+        },
+        mutating=True,
+    )
+    assert verdict.risk is Risk.SAFE
+
+
+def test_a_file_whose_extension_nobody_can_see_asks():
+    """The fallback for when UIA carries no filename either. Activating a file
+    manager item runs whatever it is, and "probably a document" is not a safety
+    argument - the cost of asking is one prompt."""
+    verdict = classify(
+        "click",
+        {"index": 71, "label": "setup", "control_type": "ListItem", "process": "explorer.exe"},
+        mutating=True,
+    )
+    assert verdict.risk is Risk.CONFIRM
+    assert "extension is hidden" in verdict.reason
+
+
+def test_a_list_item_outside_a_file_manager_is_not_a_file():
+    """A ListItem in a mail client is a message. Confirming every one of those
+    would teach people to say yes without reading, which costs more safety than
+    it buys."""
+    verdict = classify(
+        "click",
+        {"index": 8, "label": "Re: lunch", "control_type": "ListItem", "process": "outlook.exe"},
+        mutating=True,
+    )
+    assert verdict.risk is Risk.SAFE
+
+
+def test_a_toolbar_button_is_not_treated_as_a_hidden_file():
+    """Most of what the agent clicks in Explorer is the toolbar, and none of it
+    should start asking."""
+    verdict = classify(
+        "click",
+        {"index": 3, "label": "Refresh", "control_type": "Button", "process": "explorer.exe"},
+        mutating=True,
+    )
+    assert verdict.risk is Risk.SAFE
+
+
+def test_element_recovers_the_filename_explorer_hid():
+    """UIA still knows the whole name even when the display name is stripped -
+    in the value or the automation id, depending on the view."""
+    from victor.desktop import Element, Rect
+
+    hidden_in_value = Element(
+        1, "ListItem", "setup", Rect(0, 0, 10, 10), value=r"C:\Users\g\Downloads\setup.exe"
+    )
+    hidden_in_id = Element(
+        2, "ListItem", "install", Rect(0, 0, 10, 10), automation_id="install.bat"
+    )
+    plain = Element(3, "ListItem", "notes.txt", Rect(0, 0, 10, 10))
+    a_button = Element(4, "Button", "Refresh", Rect(0, 0, 10, 10))
+
+    assert hidden_in_value.filename == "setup.exe"
+    assert hidden_in_id.filename == "install.bat"
+    assert plain.filename == "notes.txt"
+    assert a_button.filename == ""
+
+
+def test_an_unrelated_value_is_not_mistaken_for_the_filename():
+    """An Edit box's value is its contents, not a filename. Matching the stem
+    against the display name is what keeps this from inventing one."""
+    from victor.desktop import Element, Rect
+
+    edit = Element(1, "Edit", "Search", Rect(0, 0, 10, 10), value="report.docx")
+    assert edit.filename == ""
+
+
+def test_a_stripped_label_does_not_satisfy_an_executable():
+    """The other half of the hole. Label matching is deliberately forgiving, so
+    "setup" was a substring match for "setup.exe" and sailed straight through
+    the re-verification that exists to catch exactly this."""
+    target, _ = desktop("setup.exe", "notes.txt")
+    result = target.click(0, "setup")
+
+    assert not result.ok
+    assert "would run" in result.detail
+    assert "Name it in full" in result.detail
+
+
+def test_naming_the_executable_in_full_still_works():
+    """The refusal has to be escapable, or the agent cannot ever run an
+    installer the user actually asked for."""
+    target, actuator = desktop("setup.exe", "notes.txt")
+    assert target.click(0, "setup.exe").ok
+
+
+def test_a_stripped_label_is_still_fine_for_a_document():
+    """Only the executable case is tightened. Ordinary labels gain and lose
+    decoration between reads, and refusing those would break normal use."""
+    target, _ = desktop("notes.txt")
+    assert target.click(0, "notes").ok
     """Whatever gets picked from the menu is classified when it is clicked."""
     verdict = classify("click", {"index": 1, "label": "Delete", "button": "right"}, mutating=True)
     assert verdict.risk is Risk.SAFE
@@ -904,6 +1028,34 @@ def test_the_cli_click_path_is_gated_like_the_agent(tmp_path, monkeypatch):
 
     allowed = registry.run("click", {"index": 1, "label": "notes.txt"})
     assert allowed.ok is True, "a document click should not have been stopped"
+
+
+def test_the_gate_sees_the_hidden_extension_the_model_could_not(tmp_path, monkeypatch):
+    """End to end for the Windows hole. The tree carries `setup.exe`, Explorer
+    would have shown the model `setup`, and the model passes `setup` - so the
+    label alone cannot save this. The registry asks the tool what the index
+    actually points at, and the classifier gets the filename."""
+    registry, interceptor = cli_registry(
+        tmp_path, monkeypatch, yes=False, buttons=("setup.exe", "notes.txt")
+    )
+
+    blocked = registry.run("click", {"index": 0, "label": "setup"})
+    assert blocked.ok is False
+    assert interceptor.stats.denied + interceptor.stats.refused == 1
+
+    # And the ordinary case still does not nag.
+    assert registry.run("click", {"index": 1, "label": "notes"}).ok is True
+
+
+def test_a_tool_without_describe_is_unaffected(tmp_path, monkeypatch):
+    """The hook is optional - every other tool must keep working untouched."""
+    from victor.config import Settings
+    from victor.tools import build_registry
+
+    monkeypatch.setenv("VICTOR_DATA_DIR", str(tmp_path))
+    registry = build_registry(Settings(_env_file=None, VICTOR_DATA_DIR=str(tmp_path)))
+    assert not hasattr(registry.get("shell"), "describe")
+    assert registry.run("read_file", {"path": "pyproject.toml"}).ok
 
 
 def test_the_cli_click_path_journals(tmp_path, monkeypatch):

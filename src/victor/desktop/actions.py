@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from ..errors import VictorError
+from ..safety.classify import executable_label
 from . import keys as keymap
 from .elements import Element, Snapshot
 from .uia import PerceptionUnavailable, TreeReader
@@ -814,6 +815,21 @@ class Desktop:
                     snapshot,
                     f"element {index} is {element.label!r}, not {expect!r} - "
                     f"the screen changed since you looked.{suggestion}",
+                )
+
+            # The substring match above is deliberately forgiving, because real
+            # labels gain and lose decoration between reads. But it means
+            # "setup" satisfies "setup.exe", and that is the difference between
+            # a document and a program. Insist on the extension when the thing
+            # being clicked has an executable one.
+            runs = executable_label(element.filename or element.label)
+            if runs and not executable_label(expect):
+                return Resolution(
+                    None,
+                    snapshot,
+                    f"element {index} is {element.filename or element.label!r}, a "
+                    f".{runs} that would run - you asked for {expect!r}. Name it in "
+                    "full to confirm you meant the executable.",
                 )
 
         if not element.enabled:

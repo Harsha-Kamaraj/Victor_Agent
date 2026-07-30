@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterator
+from contextlib import closing
 from dataclasses import dataclass, field
 from importlib.util import find_spec
 from pathlib import Path
@@ -451,42 +452,49 @@ def _p6_memory(settings: Settings) -> tuple[Status, str]:
             embedder_name=embedder.name,
             dimensions=embedder.dimensions,
         )
-        memory = Memory(store, embedder)
-        watcher = ErrorFixWatcher(memory)
+        # closing() rather than a bare close() at the end: every `return
+        # Status.FAIL` below is inside this directory, and the SQLite file has
+        # to be shut before Windows will remove it. Without this the gate
+        # passed every assertion and then died in cleanup - on Windows only,
+        # where an open file cannot be unlinked.
+        with closing(store):
+            memory = Memory(store, embedder)
+            watcher = ErrorFixWatcher(memory)
 
-        # The whole capture rule, in four observations.
-        watcher.observe("python3 app.py", ok=False, output=traceback)
-        watcher.observe("ls -la", ok=True)  # looking around, must be ignored
-        watcher.observe("pip install httpx", ok=True)
-        note = watcher.observe("python3 app.py", ok=True)
-        if note is None:
-            return Status.FAIL, "the fix was not captured"
+            # The whole capture rule, in four observations.
+            watcher.observe("python3 app.py", ok=False, output=traceback)
+            watcher.observe("ls -la", ok=True)  # looking around, must be ignored
+            watcher.observe("pip install httpx", ok=True)
+            note = watcher.observe("python3 app.py", ok=True)
+            if note is None:
+                return Status.FAIL, "the fix was not captured"
 
-        started = time.perf_counter()
-        recalled = memory.recall_for_error(traceback)
-        elapsed = (time.perf_counter() - started) * 1000
+            started = time.perf_counter()
+            recalled = memory.recall_for_error(traceback)
+            elapsed = (time.perf_counter() - started) * 1000
 
-        if not recalled.found:
-            return Status.FAIL, "the captured fix could not be recalled"
-        fix = recalled.best.record.meta.get("fix", "")
-        if "pip install httpx" not in fix:
-            return Status.FAIL, f"recalled the wrong fix: {fix!r}"
-        if "ls -la" in fix:
-            return Status.FAIL, "a diagnostic was stored as the fix"
+            if not recalled.found:
+                return Status.FAIL, "the captured fix could not be recalled"
+            fix = recalled.best.record.meta.get("fix", "")
+            if "pip install httpx" not in fix:
+                return Status.FAIL, f"recalled the wrong fix: {fix!r}"
+            if "ls -la" in fix:
+                return Status.FAIL, "a diagnostic was stored as the fix"
 
-        # The other half of the change that made this gate worth having.
-        click = describe_call("click", {"index": 3, "label": "Save"}, mutating=True)
-        focus = describe_call("open_app", {"name": "Notepad"}, mutating=True)
-        watcher.observe(click, ok=False, output="no element at index 3")
-        watcher.observe(focus, ok=True)
-        if watcher.observe(click, ok=True) is None:
-            return Status.FAIL, "a desktop fix was not captured"
+            # The other half of the change that made this gate worth having.
+            click = describe_call("click", {"index": 3, "label": "Save"}, mutating=True)
+            focus = describe_call("open_app", {"name": "Notepad"}, mutating=True)
+            watcher.observe(click, ok=False, output="no element at index 3")
+            watcher.observe(focus, ok=True)
+            if watcher.observe(click, ok=True) is None:
+                return Status.FAIL, "a desktop fix was not captured"
 
-        embedder_name = memory.embedder.name
+            embedder_name = memory.embedder.name
+            best_score = recalled.best.score
 
     return Status.OK, (
         f"captured shell and desktop fixes; recalled at "
-        f"{recalled.best.score:.2f} in {elapsed:.0f}ms, 0 API calls ({embedder_name})"
+        f"{best_score:.2f} in {elapsed:.0f}ms, 0 API calls ({embedder_name})"
     )
 
 
@@ -532,16 +540,25 @@ def _p8_tracing(settings: Settings) -> tuple[Status, str]:
 
     with TemporaryDirectory() as tmp:
         trace = Trace.open(Path(tmp), label="selftest")
-        with trace.span("selftest.span") as span:
-            span["cost"] = 0
-        trace.event("selftest.event", detail="written")
+        try:
+            with trace.span("selftest.span") as span:
+                span["cost"] = 0
+            trace.event("selftest.event", detail="written")
 
-        written = list(Path(tmp).glob("*.jsonl"))
-        if not written:
-            return Status.FAIL, "no trace file was written"
-        # Read it back before closing: the claim is that a killed process still
-        # leaves a readable trace, which is only true if every event is flushed.
-        lines = written[0].read_text(encoding="utf-8").strip().splitlines()
+            written = list(Path(tmp).glob("*.jsonl"))
+            if not written:
+                return Status.FAIL, "no trace file was written"
+            # Read it back while the trace is still open: the claim is that a
+            # killed process leaves a readable trace, which is only true if
+            # every event is flushed as it is written rather than at close.
+            lines = written[0].read_text(encoding="utf-8").strip().splitlines()
+        finally:
+            # Windows will not remove a directory containing an open file, so
+            # leaving this to garbage collection made the gate die on cleanup
+            # after passing every assertion - on Windows only. The `finally`
+            # matters as much as the close: the early return above is inside
+            # the directory too.
+            trace.close()
 
     if len(lines) < 2:
         return Status.FAIL, f"trace held {len(lines)} events, expected at least 2"

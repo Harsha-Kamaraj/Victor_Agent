@@ -229,6 +229,30 @@ class ClickTool(_DesktopTool):
             mutating=True,
         )
 
+    def describe(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """What this click actually points at, for the safety layer.
+
+        The model passes the label it was shown, and on Windows that label has
+        had the file extension stripped by Explorer before Victor ever saw it.
+        Read from the cached tree instead - no refresh, so this costs nothing
+        and cannot change what the click resolves to a moment later.
+
+        Never raises: enrichment failing has to leave the ordinary
+        label-based classification in place, not block the call.
+        """
+        try:
+            snapshot = self.desktop.snapshot(refresh=False)
+            element = snapshot.by_index(int(arguments.get("index", -1)))
+        except Exception:  # noqa: BLE001 - no tree is not a reason to refuse
+            return {}
+        if element is None:
+            return {}
+        return {
+            "filename": element.filename,
+            "control_type": element.control_type,
+            "process": snapshot.process,
+        }
+
     def run(
         self, index: int, label: str = "", button: str = "left", double: bool = False
     ) -> ToolResult:
