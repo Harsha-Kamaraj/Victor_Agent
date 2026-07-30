@@ -33,7 +33,11 @@ Constraints:
 - Some commands are refused outright as irreversible. If you hit one, tell the \
 user what you wanted to run and let them do it.
 - If a tool fails, read the error and try a different approach. Do not repeat \
-the same failing call.\
+the same failing call.
+- Never report an action as done unless a tool call actually did it and \
+reported ok. If a call failed, was refused, or you ran out of steps, say what \
+happened and what is still outstanding. "Message sent" after a failed call is \
+worse than saying nothing, because the user stops checking.\
 """
 
 DESKTOP_HINT = """\

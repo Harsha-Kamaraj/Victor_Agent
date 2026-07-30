@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import IntEnum
 
 from ..tools.git import READ_ONLY as GIT_READ_ONLY
@@ -55,6 +55,14 @@ class Classification:
     whole classifier only as trustworthy as its weakest layer."""
     source: str = "rule"
     """Which layer produced this: ``rule``, ``llm``, or ``llm-failed``."""
+    read_only: bool = False
+    """This call was *recognised* as reading rather than acting.
+
+    Not the same question as :attr:`risk`. ``SAFE`` means "not dangerous", and
+    the adjudicator can clear an unrecognised command to it - ``open -a
+    Messages`` is neither dangerous nor read-only. Only the rules that match a
+    curated read-only list set this, so a dry run can allow looking without
+    also allowing anything an LLM happened to think was harmless."""
 
     @property
     def needs_confirmation(self) -> bool:
@@ -219,14 +227,23 @@ def classify_shell(command: str) -> Classification:
     if not command.strip():
         return Classification(Risk.CONFIRM, "empty command", command)
 
-    worst = Classification(Risk.SAFE, "reads only")
-    for raw in _SPLIT.split(command):
-        segment = raw.strip()
-        if not segment:
-            continue
-        verdict = _classify_segment(segment)
-        if verdict.risk > worst.risk:
-            worst = verdict
+    verdicts = [
+        _classify_segment(segment)
+        for segment in (raw.strip() for raw in _SPLIT.split(command))
+        if segment
+    ]
+    if not verdicts:
+        # Only separators. Nothing runs, so nothing is read or written.
+        return Classification(Risk.SAFE, "reads only", read_only=True)
+
+    worst = max(verdicts, key=lambda verdict: verdict.risk)
+    if worst.risk is Risk.SAFE:
+        # A command line reads only if *every* part of it does. The loop this
+        # replaced seeded `worst` with a placeholder and only overwrote it on a
+        # strictly higher risk - so when every segment was SAFE the placeholder
+        # was what came back, carrying its own default flags rather than the
+        # segments'.
+        return replace(worst, read_only=all(verdict.read_only for verdict in verdicts))
     return worst
 
 
@@ -254,7 +271,7 @@ def _classify_segment(segment: str) -> Classification:
             return Classification(Risk.CONFIRM, f"{name} {why}", segment)
 
     if name in READ_ONLY_COMMANDS:
-        return Classification(Risk.SAFE, f"{name} reads only")
+        return Classification(Risk.SAFE, f"{name} reads only", read_only=True)
 
     if name in KNOWN_MUTATING:
         return Classification(Risk.CONFIRM, f"{name} {KNOWN_MUTATING[name]}", segment)
@@ -280,9 +297,9 @@ _FORCE_FLAGS = frozenset({"--force", "-f"})
 def _classify_git_shell(args: list[str], segment: str) -> Classification:
     subcommand = next((a for a in args if not a.startswith("-")), None)
     if subcommand is None:
-        return Classification(Risk.SAFE, "git with no subcommand")
+        return Classification(Risk.SAFE, "git with no subcommand", read_only=True)
     if subcommand in GIT_READ_ONLY:
-        return Classification(Risk.SAFE, f"git {subcommand} reads only")
+        return Classification(Risk.SAFE, f"git {subcommand} reads only", read_only=True)
     if subcommand == "push":
         return _classify_git_push(args, segment)
     return Classification(Risk.CONFIRM, f"git {subcommand} may modify the repository", segment)
@@ -330,6 +347,15 @@ _CONSEQUENTIAL_LABEL = re.compile(
     r"\b("
     r"delete|remove|erase|uninstall|discard|revoke|deactivate|"
     r"send|submit|publish|post|share|"
+    # Placing a call reaches another person and cannot be taken back, which
+    # makes it the most consequential button on a messaging window and the one
+    # nothing here covered. `\b` keeps it off "Recall" and off the "Calls" tab -
+    # navigating to a list of calls is not making one.
+    r"call|dial|"
+    # No bare "report": it matches report.pdf and report.docx, and a
+    # confirmation on every document named report is exactly the noise that
+    # teaches people to approve without reading.
+    r"block|unfriend|leave\s+(the\s+)?(group|chat|call|meeting)|"
     r"buy|purchase|pay|checkout|order|subscribe|"
     r"format|reset|restore\s+defaults|factory\s+reset|"
     r"shut\s*down|restart|log\s*out|sign\s*out|"

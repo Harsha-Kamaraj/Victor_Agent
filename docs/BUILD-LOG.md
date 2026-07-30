@@ -1848,3 +1848,81 @@ carries risk without benefit, and it is noted here so the next person to give it
 meaning knows to fix the test first.
 
 **815 tests.** `victor selftest`: 12 passed, 0 failed, 0 API requests.
+
+## The desktop path, as found by using it *(added after P8)*
+
+Harsha ran `converse` and then `do --desktop` against WhatsApp. Five defects, and
+the first two are the kind that make the rest of the project's claims hollow.
+
+**`converse` had no `--desktop` flag at all.** The one command whose entire
+purpose is driving a computer by voice could not reach the desktop tools. So a
+spoken "open the chat and type this" fell back to `shell`, and the model did the
+only thing left to it: blind AppleScript.
+
+```
+osascript -e 'tell application "System Events" to keystroke "f" using {command down}'
+         -e 'keystroke "Harsha"' -e 'delay 0.5' …
+```
+
+That is exactly the guessing this project exists to replace, produced *by* this
+project, because the alternative was not switched on. `--desktop` and `--app` now
+exist on `converse`.
+
+**`--dry-run` clicked the button and typed the text.** The dry-run check sat
+*below* the early return for `Risk.SAFE` — so it only ever caught actions that
+needed confirmation anyway. Every desktop click and keystroke grades SAFE, which
+means the banner read "actions will be previewed, not executed" and then the
+agent pressed `Harsha💕` and typed into the compose box. A preview that acts is
+worse than no preview: the banner is the reason the user allowed it to run.
+
+Moving the check up took two attempts, and the first is the interesting one.
+Keying it off `spec.mutating` broke reads — the shell tool declares
+`mutating=True` for every command because any of them *might* write. Keying it
+off `risk is SAFE` let `open -a Messages` launch an application, because SAFE
+also means "not dangerous", and the adjudicator hands that to any command no rule
+recognises. Neither existing signal answered the question being asked, so
+`Classification.read_only` now states it directly, set only where a curated
+read-only list matched.
+
+Which surfaced a third bug underneath: `classify_shell` seeded its loop with
+`Classification(Risk.SAFE, "reads only")` and replaced it only on a *strictly*
+higher risk. When every segment was SAFE, the seed was what came back — carrying
+its own default flags rather than the segments'. `echo hi` was being reported
+with the placeholder's attributes, not its own. The aggregate is now `max()` over
+real verdicts, and reads only if every segment does.
+
+**Typing went to the terminal.** `type_text` with no `into` sends keystrokes
+wherever the OS says focus is — which during a run is the terminal Victor was
+launched from. `hello from Victor` landed on the user's shell prompt. With
+`submit=True` it would have pressed return on it, running whatever was typed with
+none of the shell tool's classification, trash or journal in the way.
+
+`_refuse_terminal` could not catch this: it inspects `desktop.snapshot()`, and
+with `--app` pinned that describes the *target* window while the keys go to the
+*focused* one. Two windows, one check. `type_text` now requires a target index,
+which is the rule this project already applies to clicking — act on a control you
+have read, never on a guess — and a named target is written through the
+accessibility API rather than the keyboard, so it cannot leak into another window
+at all. `press_keys` raises the pinned app first, collapsing the divergence
+instead of trying to detect it.
+
+**It said "Message sent." when nothing had been sent.** The trace shows
+`tool.run … ok: false` on the osascript and the very next `agent.answer` claiming
+success. The user caught it — *"No, it's not sent"*. The system prompt now says a
+failed or refused call may not be reported as done, because a confident false
+"done" is worse than silence: the user stops checking.
+
+**Calling someone was not a confirmed action.** `_CONSEQUENTIAL_LABEL` already
+covered send, post, buy and delete, but not `call` — and a messaging window's
+most consequential button is `Start voice call with …`, which reaches another
+person and has no undo. Added with `block`, `unfriend` and `leave group`. Not
+`report`, which matches `report.pdf`; a confirmation on every document named
+report is the alarm fatigue this classifier's own docstring warns about. Checked
+against the real tree: calls and sends confirm, while `Calls`, `Chats`, `Search`
+and `Recall` stay silent, so navigating an app is still fluid.
+
+The lesson is the one this log keeps recording, in a new place. Every one of
+these survived a green suite because no test ran the desktop tools *as a user
+would*: with a flag on, in a real app, from a terminal that had focus.
+
+**833 tests.**

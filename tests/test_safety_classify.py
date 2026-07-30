@@ -262,3 +262,42 @@ def test_argument_order_does_not_change_the_verdict() -> None:
         classify_shell("git push --force origin main").risk
         is classify_shell("git push origin main --force").risk
     )
+
+
+# --- clicks that reach another person ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "Start voice call with Gagandeep PESU",
+        "Start video call with Gagandeep PESU",
+        "Send",
+        "Block",
+        "Leave group",
+        "Delete chat",
+    ],
+)
+def test_a_click_that_cannot_be_taken_back_is_confirmed(label: str) -> None:
+    """Real labels from a real WhatsApp accessibility tree.
+
+    Placing a call reaches another person and no undo exists for it - it is the
+    most consequential button on a messaging window and nothing here covered it.
+    The trash cannot reach into another app, so confirmation is the only guard
+    these actions get.
+    """
+    from victor.safety.classify import classify_click
+
+    assert classify_click({"label": label, "index": 1}).risk is Risk.CONFIRM
+
+
+@pytest.mark.parametrize(
+    "label", ["Calls", "Chats", "Search", "Archived", "Settings", "Recall", "New Chat"]
+)
+def test_navigating_an_app_stays_out_of_the_way(label: str) -> None:
+    """A confirmation on every click would train the user to say yes to all of
+    them, which costs more than it buys. Looking at a list of calls is not
+    making one, and "Recall" is not "call"."""
+    from victor.safety.classify import classify_click
+
+    assert classify_click({"label": label, "index": 1}).risk is Risk.SAFE

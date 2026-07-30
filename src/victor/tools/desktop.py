@@ -19,6 +19,7 @@ safety layer can read.
 
 from __future__ import annotations
 
+import contextlib
 import re
 from typing import Any
 
@@ -111,6 +112,21 @@ class _DesktopTool:
             # whole project rests on, and AgentResult counts it.
             metadata={"method": result.method, "window": result.window, "cost": 0},
         )
+
+    def _focus_target(self) -> None:
+        """Bring the pinned app forward before sending it synthetic input.
+
+        Keystrokes go to whatever the OS says is frontmost. With ``--app`` set,
+        ``snapshot()`` describes the pinned window instead, so the two can name
+        different windows - and then :meth:`_refuse_terminal` inspects one while
+        the keys land in the other. Raising the target first collapses the
+        divergence rather than trying to detect it.
+        """
+        app = getattr(self.desktop, "app", None)
+        if not app:
+            return
+        with contextlib.suppress(Exception):
+            self.desktop.focus_app(str(app))
 
     def _refuse_terminal(self, what: str) -> ToolResult | None:
         """Block keyboard input aimed at a shell. See the module docstring."""
@@ -292,13 +308,35 @@ class TypeTextTool(_DesktopTool):
     def run(
         self, text: str, into: int | None = None, label: str = "", submit: bool = False
     ) -> ToolResult:
+        if into is None:
+            # Typing with no target goes wherever the OS says focus is, which
+            # during a run is the terminal Victor was launched from - and
+            # `_refuse_terminal` below cannot catch it, because with --app
+            # pinned the snapshot describes the target window while the
+            # keystrokes go to the focused one. That divergence typed a message
+            # into the user's shell prompt; with submit=True it would have
+            # pressed return on it, running whatever was typed and bypassing
+            # every check the shell tool exists to apply.
+            #
+            # Naming the field is also just the rule this project already has
+            # for clicking: act on a control you have read, never on a guess.
+            return ToolResult(
+                ok=False,
+                error=(
+                    "type_text needs the index of the field to type into. Call "
+                    "screen_read first and pass into=<index> with its label. "
+                    "Without a target the text goes to whatever window happens "
+                    "to be focused, which is not necessarily the app you mean."
+                ),
+                metadata={"refused": "no-target"},
+            )
         refusal = self._refuse_terminal("typing")
         if refusal is not None:
             return refusal
         return self._guard(
             self.desktop.type_text,
             str(text),
-            into=None if into is None else int(into),
+            into=int(into),
             expect=label or None,
             submit=bool(submit),
         )
@@ -328,6 +366,11 @@ class PressKeysTool(_DesktopTool):
         )
 
     def run(self, keys: str) -> ToolResult:
+        # Raise the target first: `press_keys('return')` with a pinned --app was
+        # sending the keystroke to whichever window really had focus, which is
+        # the terminal Victor runs in. Pressing return there submits whatever
+        # sits at the prompt.
+        self._focus_target()
         refusal = self._refuse_terminal("pressing keys")
         if refusal is not None:
             return refusal

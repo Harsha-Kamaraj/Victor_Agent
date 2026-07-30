@@ -780,6 +780,13 @@ class Desktop:
         self.actuator = actuator or select_actuator()
         self.kill_switch = kill_switch
         self.settle = settle
+        self.app = app
+        """The pinned target, kept because synthetic input needs to reach it.
+
+        ``TreeReader`` hands this to the backend and forgets it, but keystrokes
+        go to whatever the OS currently considers frontmost - which is not the
+        pinned window unless somebody makes it so.
+        """
 
     def available(self) -> tuple[bool, str]:
         ok, detail = self.reader.available()

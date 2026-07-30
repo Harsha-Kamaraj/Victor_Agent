@@ -851,3 +851,63 @@ def test_the_spoken_prompt_is_punctuated_into_sentences(tmp_path: Path) -> None:
     assert "more This" not in spoken  # the missing full stop this guards
     assert spoken.count(".") >= 3
     assert spoken.endswith("Say yes to continue, or no to stop.")
+
+
+# --- a dry run has to actually be dry ---------------------------------------
+
+
+def test_a_dry_run_stops_a_safe_mutating_action(tmp_path: Path) -> None:
+    """The dry-run check sat *below* the early return for SAFE, so it only ever
+    caught actions that needed confirming anyway.
+
+    Every desktop click and keystroke grades SAFE. So `--dry-run` printed
+    "actions will be previewed, not executed" and then pressed the button and
+    typed the text. A preview that acts is worse than no preview at all: the
+    banner is the reason the user let it run.
+    """
+    clicking = ToolSpec("click", "click", {"type": "object"}, mutating=True)
+    gate = interceptor(dry_run=True, cwd=tmp_path)
+
+    review = gate.review(clicking, {"index": 3, "label": "Harsha"})
+
+    assert review.decision is Decision.DENY
+    assert "dry run" in review.reason
+    assert gate.stats.dry_run == 1
+
+
+def test_a_dry_run_still_lets_the_agent_look(tmp_path: Path) -> None:
+    """Read-only calls have to keep working, or the preview has nothing to
+    describe - the agent cannot say what it would click without reading first."""
+    reading = ToolSpec("screen_read", "read", {"type": "object"}, mutating=False)
+    gate = interceptor(dry_run=True, cwd=tmp_path)
+
+    assert gate.review(reading, {}).decision is Decision.ALLOW
+
+
+def test_a_dry_run_does_not_turn_safe_into_a_question(tmp_path: Path) -> None:
+    """Moving the check must not cost the SAFE fast path: with dry_run off, a
+    harmless mutating call is still allowed without asking anyone."""
+    clicking = ToolSpec("click", "click", {"type": "object"}, mutating=True)
+    gate = interceptor(confirmer=DenyingConfirmer(), cwd=tmp_path)
+
+    assert gate.review(clicking, {"index": 3, "label": "Chats"}).decision is Decision.ALLOW
+
+
+def test_a_dry_run_does_not_launch_an_app_the_llm_called_harmless(tmp_path: Path) -> None:
+    """`open -a Messages` is neither dangerous nor read-only.
+
+    The first attempt at the dry-run fix keyed off `risk is SAFE`, and SAFE is
+    also what the adjudicator hands to commands no rule recognises. So a dry run
+    still launched an application. `read_only` is the positive form of the
+    question and only the curated lists set it.
+    """
+    from victor.safety.classify import Classification
+
+    gate = interceptor(dry_run=True, cwd=tmp_path)
+    # The verdict a cleared-but-unrecognised command arrives with.
+    cleared = Classification(Risk.SAFE, "a check agreed it may be fine", source="llm")
+    assert cleared.read_only is False
+
+    review = gate.review(SHELL, {"command": "open -a Messages"})
+    assert review.decision is Decision.DENY
+    assert "dry run" in review.reason

@@ -560,7 +560,9 @@ def test_a_failed_action_is_a_result_not_an_exception():
 def test_typing_into_a_terminal_is_refused(title, process):
     """The one hole that would undo P3: a shell no classifier ever sees."""
     tools, actuator = tools_over("Prompt", title=title, process=process)
-    result = tools["type_text"].run(text="rm -rf /")
+    # into=0 so this still exercises the terminal check rather than stopping at
+    # the missing-target check that now precedes it.
+    result = tools["type_text"].run(text="rm -rf /", into=0)
     assert result.ok is False
     assert result.metadata["refused"] == "terminal"
     assert "shell tool" in (result.error or "")
@@ -575,8 +577,30 @@ def test_shortcuts_into_a_terminal_are_refused_too():
 
 def test_typing_into_an_ordinary_window_is_allowed():
     tools, actuator = tools_over("Search", title="Inbox - Mail", process="mail.exe")
-    assert tools["type_text"].run(text="hello").ok
-    assert any(call[0] == "type_text" for call in actuator.calls)
+    assert tools["type_text"].run(text="hello", into=0).ok
+    # set_value or keystrokes - a named target is written through the
+    # accessibility API when it can be, and only falls back to typing.
+    assert any(call[0] in {"set_value", "type_text"} for call in actuator.calls)
+
+
+def test_typing_with_no_target_is_refused() -> None:
+    """Text with no destination goes wherever focus happens to be.
+
+    During a run that is the terminal Victor was launched from - and the
+    terminal check cannot catch it, because with `--app` pinned the snapshot
+    describes the target window while the keystrokes go to the focused one.
+    Observed: a message typed straight onto the user's shell prompt. With
+    submit=True it would have pressed return on it, running whatever was typed
+    without the shell tool, its classifier, its trash or its journal.
+    """
+    tools, actuator = tools_over("Search", title="Inbox - Mail", process="mail.exe")
+
+    result = tools["type_text"].run(text="hello from Victor")
+
+    assert result.ok is False
+    assert result.metadata["refused"] == "no-target"
+    assert "screen_read" in (result.error or "")
+    assert actuator.calls == [], "text was sent despite having no target"
 
 
 @pytest.mark.parametrize(

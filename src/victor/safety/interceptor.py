@@ -114,12 +114,25 @@ class SafetyInterceptor:
                 summary,
             )
 
-        if verdict.risk is Risk.SAFE:
-            self.stats.allowed += 1
-            return Review(Decision.ALLOW, verdict.reason)
-
-        # From here on the call needs confirmation.
-        if self.dry_run:
+        # Before the SAFE branch, not after it. A dry run promises that nothing
+        # happens, and this check used to sit below the early return for SAFE -
+        # so it only ever caught actions that needed confirmation anyway. Every
+        # desktop click and keystroke grades SAFE, which meant `--dry-run`
+        # printed "actions will be previewed, not executed" and then pressed the
+        # button and typed the text. A preview that acts is worse than no
+        # preview: it is a promise the user relied on.
+        #
+        # Read-only calls still run, because a preview of what would be clicked
+        # is worthless if the agent may not look at the screen first.
+        #
+        # `read_only` rather than `risk is SAFE`, because those are different
+        # questions. The shell tool declares mutating=True for every command,
+        # since any of them *might* write; only the classifier knows `git
+        # status` does not. But SAFE also covers "not dangerous", which the
+        # adjudicator hands out to commands it does not recognise - `open -a
+        # Messages` is neither dangerous nor read-only, and a first attempt at
+        # this let exactly that launch an app during a dry run.
+        if self.dry_run and spec.mutating and not verdict.read_only:
             self.stats.dry_run += 1
             # Echoing the command back is not a preview - the user typed it.
             # What they cannot predict is what a glob matched.
@@ -137,6 +150,11 @@ class SafetyInterceptor:
                 summary,
             )
 
+        if verdict.risk is Risk.SAFE:
+            self.stats.allowed += 1
+            return Review(Decision.ALLOW, verdict.reason)
+
+        # From here on the call needs confirmation.
         if not self.require_confirmation:
             self.stats.allowed += 1
             return Review(Decision.ALLOW, f"{verdict.reason} (confirmation disabled)")

@@ -556,6 +556,12 @@ def converse(
     turns: Annotated[int, typer.Option("--turns", help="How many exchanges before exiting.")] = 0,
     mode: Annotated[str, typer.Option("--mode", help="vad | ptt")] = "vad",
     steps: Annotated[int, typer.Option("--steps")] = 8,
+    desktop: Annotated[
+        bool, typer.Option("--desktop", help="Let the agent click and type on screen.")
+    ] = False,
+    app_name: Annotated[
+        str | None, typer.Option("--app", help="Point the desktop tools at one application.")
+    ] = None,
 ) -> None:
     """Hold a spoken conversation: listen, think, act, reply out loud.
 
@@ -580,10 +586,22 @@ def converse(
             voice=True,
             kill_switch=switch,
             confirmer=SpokenConfirmer(pipeline),
+            # Without these, the one command whose whole purpose is driving a
+            # computer by voice had no way to reach the desktop tools at all -
+            # so a spoken "open the chat and type this" fell back to the shell
+            # and blind AppleScript, which is the guessing this project exists
+            # to replace.
+            desktop=desktop or None,
+            app=app_name,
         )
         agent.on_step = _render_step
         try:
             warm_ms = pipeline.warm() * 1000
+            if desktop:
+                console.print(
+                    "[yellow]--desktop:[/yellow] the agent can click and type on "
+                    "your screen. Say 'stop' or press Ctrl-C to abort it mid-click."
+                )
             console.print(
                 f"[dim]voice ready in {warm_ms:.0f}ms. "
                 "Say 'stop' or press Ctrl-C to abort.[/dim]"
