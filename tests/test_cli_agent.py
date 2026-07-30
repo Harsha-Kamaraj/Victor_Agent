@@ -129,3 +129,55 @@ def test_doctor_no_longer_flags_a_missing_safety_layer(workspace: Path) -> None:
 
     assert "safety interceptor" not in checks
     assert checks["safety mode"].status is Status.OK
+
+
+def test_the_agent_closes_the_memory_it_opened(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`Agent.close()` shut the model client and forgot the SQLite connection.
+
+    Asserting that close is *called*, not that cleanup succeeded: on POSIX an
+    open file unlinks happily, so a test of the outcome passes here whatever the
+    code does. Windows is where a held handle stops the file being removed, and
+    this test has to be able to fail on the machine where that cannot happen.
+    """
+    from victor.rag.store import VectorStore
+
+    closed: list[str] = []
+    original = VectorStore.close
+
+    def spy(self, *args, **kwargs):
+        closed.append(str(self.db_path))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(VectorStore, "close", spy)
+    patch_transport(monkeypatch, scripted({"content": "You are on branch main."}))
+
+    result = runner.invoke(app, ["do", "what branch am I on"])
+
+    assert result.exit_code == 0, result.output
+    assert closed, "victor do left the memory's SQLite connection open"
+
+
+def test_an_injected_memory_is_left_open_for_its_owner(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Closing what you were handed is as wrong as leaking what you opened - the
+    caller may still be using it, and several tests are."""
+    from victor.agent import build_agent
+    from victor.rag import Memory, VectorStore
+    from victor.rag.embed import HashEmbedder
+
+    embedder = HashEmbedder()
+    store = VectorStore(
+        workspace / "borrowed", embedder_name=embedder.name, dimensions=embedder.dimensions
+    )
+    memory = Memory(store, embedder)
+    try:
+        agent = build_agent(Settings(_env_file=None, GROQ_API_KEY="k"), memory=memory)
+        agent.close()
+
+        # Still usable: the owner has not been shut down under them.
+        assert memory.recall_for_error("anything") is not None
+    finally:
+        store.close()

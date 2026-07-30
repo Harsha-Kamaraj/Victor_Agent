@@ -9,6 +9,7 @@ where that matters.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -40,12 +41,19 @@ ModuleNotFoundError: No module named 'httpx'
 
 
 @pytest.fixture
-def memory(tmp_path: Path) -> Memory:
+def memory(tmp_path: Path) -> Iterator[Memory]:
+    """Closed on the way out, because most of this file uses this fixture.
+
+    A `return` here left one SQLite connection open per test, which POSIX is
+    happy to ignore and Windows is not - and it is the same handle whose absence
+    made the P6 selftest gate die in cleanup there.
+    """
     embedder = HashEmbedder()
     store = VectorStore(
         tmp_path / "memory", embedder_name=embedder.name, dimensions=embedder.dimensions
     )
-    return Memory(store, embedder)
+    yield Memory(store, embedder)
+    store.close()
 
 
 # --- embedding -------------------------------------------------------------
@@ -90,10 +98,10 @@ def test_a_record_survives_a_reopen(tmp_path: Path):
     store.add("connection refused", embedder.encode(["connection refused"])[0], kind="fix")
     store.close()
 
-    reopened = VectorStore(directory, **kwargs)
-    assert len(reopened) == 1
-    hits = reopened.search(embedder.encode(["connection refused"])[0], k=1)
-    assert hits[0].score == pytest.approx(1.0, abs=1e-6)
+    with VectorStore(directory, **kwargs) as reopened:
+        assert len(reopened) == 1
+        hits = reopened.search(embedder.encode(["connection refused"])[0], k=1)
+        assert hits[0].score == pytest.approx(1.0, abs=1e-6)
 
 
 def test_deleting_the_index_loses_nothing(tmp_path: Path):
@@ -105,8 +113,8 @@ def test_deleting_the_index_loses_nothing(tmp_path: Path):
     store.index_path.unlink(missing_ok=True)
     store.close()
 
-    reopened = VectorStore(tmp_path / "memory", **kwargs)
-    assert len(reopened) == 1
+    with VectorStore(tmp_path / "memory", **kwargs) as reopened:
+        assert len(reopened) == 1
 
 
 def test_remembering_the_same_thing_twice_stores_it_once(memory: Memory):
@@ -643,3 +651,44 @@ def test_a_cached_model_is_still_preferred_when_downloads_are_declined(
     (snapshot / "model_optimized.onnx").write_bytes(b"weights")
 
     assert select_embedder(tmp_path, auto_download=False).name == "fastembed"
+
+
+def test_a_store_that_refuses_to_open_does_not_hold_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ``__init__`` that raises hands the caller no object to close.
+
+    ``EmbedderChanged`` is the case that matters: its remedy is
+    `victor index --rebuild`, which has to replace the very files the failed
+    open was still holding. `build_agent` swallows this error and carries on, so
+    the handle stayed open for the life of the process - invisible on POSIX,
+    fatal to the remedy on Windows.
+
+    Watching the connection close rather than trying to delete the file,
+    because deleting an open file succeeds on this machine whatever the code
+    does. `sqlite3.Connection` is immutable, so the spy arrives as the
+    connection factory instead of a patched method.
+    """
+    import sqlite3
+
+    embedder = HashEmbedder()
+    VectorStore(
+        tmp_path / "m", embedder_name=embedder.name, dimensions=embedder.dimensions
+    ).close()
+
+    closes: list[int] = []
+
+    class Watched(sqlite3.Connection):
+        def close(self) -> None:
+            closes.append(id(self))
+            super().close()
+
+    real = sqlite3.connect
+    monkeypatch.setattr(
+        sqlite3, "connect", lambda *a, **kw: real(*a, factory=Watched, **kw)
+    )
+
+    with pytest.raises(EmbedderChanged):
+        VectorStore(tmp_path / "m", embedder_name="fastembed", dimensions=384)
+
+    assert closes, "the refused store kept its SQLite connection open"

@@ -15,6 +15,7 @@ Three limits, all reported rather than silently enforced:
 
 from __future__ import annotations
 
+import contextlib
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -142,6 +143,7 @@ class Agent:
         on_step: Callable[[Step], None] | None = None,
         kill_switch: Any | None = None,
         memory: Any | None = None,
+        owns_memory: bool = False,
     ) -> None:
         self.settings = settings
         self.client = client
@@ -154,6 +156,8 @@ class Agent:
         self.on_step = on_step
         self.kill_switch = kill_switch
         self.memory = memory
+        self.owns_memory = owns_memory
+        """Whether :meth:`close` should shut the memory down. See :meth:`close`."""
         self.watcher = None
         if memory is not None:
             from ..rag.ingest import ErrorFixWatcher
@@ -382,7 +386,29 @@ class Agent:
             self.trace.event("memory.error", detail=f"{type(exc).__name__}: {exc}")
 
     def close(self) -> None:
+        """Release what this agent opened.
+
+        The memory holds a SQLite connection, and nothing closed it: every
+        ``victor do`` and every ``victor converse`` session leaked the handle.
+        POSIX hides that - an open file can still be unlinked - so the suite was
+        silent while the ResourceWarnings piled up unread. On Windows a held
+        handle is exactly what stops a file being removed, which is the same
+        shape as the two selftest gates that passed every assertion and then
+        died in cleanup there.
+
+        Only what it opened. A caller who passes ``memory=`` keeps the right to
+        go on using it afterwards, which several tests do, so ownership is
+        recorded at construction rather than guessed at here.
+        """
         self.client.close()
+        if not self.owns_memory or self.memory is None:
+            return
+        close = getattr(self.memory, "close", None)
+        if callable(close):
+            # A memory that will not shut cleanly must not turn a finished run
+            # into a failed one - the answer is already in hand by this point.
+            with contextlib.suppress(Exception):
+                close()
 
 
 def build_agent(
@@ -448,11 +474,16 @@ def build_agent(
             vision=vision,
         )
 
+    # Whoever opens the store closes it. Tracked rather than inferred, because
+    # an injected memory belongs to the caller and closing it would pull the
+    # floor out from under them.
+    owns_memory = False
     if memory is None and settings.memory_enabled:
         from ..rag import build_memory
 
         try:
             memory = build_memory(settings, trace=trace)
+            owns_memory = memory is not None
         except VictorError as exc:
             # A memory that will not open is a reason to run without one, not a
             # reason not to run. The commonest cause is a store built with a
@@ -470,4 +501,5 @@ def build_agent(
         voice=voice,
         kill_switch=kill_switch,
         memory=memory,
+        owns_memory=owns_memory,
     )

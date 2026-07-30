@@ -91,6 +91,20 @@ markers = [
     # cannot silently grant a test the internet it is being denied.
     "network: needs real network access; exempt from the offline guard in conftest",
 ]
+filterwarnings = [
+    # Python hides ResourceWarning by default, so four separate handle leaks -
+    # two selftest gates, the agent's memory, and a store whose __init__ raised
+    # - were being reported on every run and shown to nobody. Every one of them
+    # is invisible on POSIX and fatal on Windows, where an open handle is what
+    # stops a file being removed.
+    #
+    # `always` rather than `error` on purpose: the warning fires when the object
+    # is collected, which pytest attributes with a gc pass but cannot pin
+    # perfectly, and a leak inside a dependency would then fail a suite that has
+    # nothing wrong with it. Visible on every run is enough - the leak is only
+    # ever missed when nothing prints it.
+    "always::ResourceWarning",
+]
 
 [tool.ruff]
 line-length = 100

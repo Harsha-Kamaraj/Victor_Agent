@@ -1688,3 +1688,56 @@ fixed because a function whose whole contract is "fits within limit" must not
 return ten times it.
 
 **785 tests.**
+
+## Four handle leaks that were being reported on every run *(added after P8)*
+
+Coverage was not what found these. `pytest --cov` printed
+`ResourceWarning: unclosed database` in among the coverage table — and Python
+hides ResourceWarning by default, so these had been firing unread for as long as
+they had existed. The warning names the collection point rather than the
+allocation, so `-X tracemalloc` was needed to get the real stack:
+
+```
+cli.py:505         build_agent(...)
+loop.py:455        memory = build_memory(settings, trace=trace)
+store.py:117       self._db = sqlite3.connect(...)
+```
+
+`Agent.close()` closed the model client and nothing else. Every `victor do` and
+every `victor converse` session leaked the memory's SQLite handle. All three call
+sites did their part — `agent.close()` in a `finally` — and the method they were
+calling only did half its job.
+
+Ownership is recorded rather than inferred: `build_agent` opens the store when
+memory is enabled and sets `owns_memory`, and a caller who passes `memory=` keeps
+it, because closing what you were handed is as wrong as leaking what you opened
+and several tests go on using theirs.
+
+The fourth was the interesting one. `VectorStore.__init__` connects to SQLite and
+*then* validates the embedder, so `EmbedderChanged` propagates out of a
+constructor that has already opened the file — leaving the caller no object to
+close. `build_agent` catches that error and continues without memory, so the
+handle was held for the life of the process. The remedy that error prints is
+`victor index --rebuild`, which has to replace those very files. On Windows the
+failure path was holding the file its own fix needs.
+
+The other two were test-side: the `memory` fixture in `test_memory.py` returned
+instead of yielding, so every test using it left a connection open, and two
+reopened stores were never closed.
+
+**This is the fourth appearance of one bug.** The P6 gate and the P8 trace were
+the first two, found on Windows by Gagan, where an open handle cannot be
+unlinked; these two were found on macOS, where it can, which is why they needed a
+warning nobody was reading rather than a failure. So `filterwarnings =
+["always::ResourceWarning"]` is now in `pyproject.toml` — `always` and not
+`error`, because the warning fires at collection time and a leak inside a
+dependency should not fail a suite that has nothing wrong with it. Visible on
+every run is the whole fix; the leak was only ever missed because nothing printed
+it.
+
+Both new tests assert that `close` is *called*, not that cleanup succeeded —
+Gagan's point, which keeps earning its keep: on POSIX an open file unlinks
+happily, so a test of the outcome passes here whatever the code does.
+
+**788 tests, 13.8 seconds.** `victor selftest`: 12 passed, 0 failed, 0 API
+requests spent.

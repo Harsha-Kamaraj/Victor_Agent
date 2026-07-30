@@ -119,9 +119,19 @@ class VectorStore:
         self._index: Any = None
         self._ids: list[int] = []
         self._vectors: list[list[float]] = []
-        self._create_schema()
-        self._check_embedder()
-        self._load_vectors()
+        try:
+            self._create_schema()
+            self._check_embedder()
+            self._load_vectors()
+        except BaseException:
+            # An ``__init__`` that raises leaves the caller no object to close,
+            # so the connection was held until the process ended. That bites
+            # hardest for :class:`EmbedderChanged`, whose remedy is
+            # ``victor index --rebuild`` - a command that has to replace these
+            # very files, and on Windows an open handle is what stops it. The
+            # failure path was holding the file its own fix needs.
+            self._db.close()
+            raise
 
     # -- schema ------------------------------------------------------------
 
