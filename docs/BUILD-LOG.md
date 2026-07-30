@@ -1741,3 +1741,57 @@ happily, so a test of the outcome passes here whatever the code does.
 
 **788 tests, 13.8 seconds.** `victor selftest`: 12 passed, 0 failed, 0 API
 requests spent.
+
+## "ok stop" meant yes *(added after P8)*
+
+`safety/confirm.py` opens with the reason it exists:
+
+> "No" misheard as "go" would run a delete the user just refused, so the
+> affirmative set is small and explicit, and anything outside it is a refusal
+> rather than a guess.
+
+`interpret()` did not do that. It matched the whole answer against the two sets,
+then fell back to examining **only the first word**. So:
+
+| spoken answer | verdict |
+|---|---|
+| `ok stop` | **yes** |
+| `yeah no` | **yes** |
+| `yes no wait` | **yes** |
+| `ok wait` | **yes** |
+| `sure but not that one` | **yes** |
+| `yes but skip the second one` | **yes** |
+
+The first three are the ones that sting: `stop` and `no` are in this module's own
+`NEGATIVE` set, sitting in an answer it graded as consent. And these are not
+contrived phrasings — out loud, this is exactly how a person corrects themselves.
+The filler comes first and the correction comes second, and the correction is the
+part that matters. `victor converse` speaks *"Say yes to continue, or no to
+stop"*, and a user who answered "ok, stop" got the delete.
+
+The rule now reads the whole answer:
+
+* a refusal **anywhere** in it makes it a refusal, whatever came first;
+* a qualifier — `but`, `except`, `unless` — makes it `None`, because "yes but not
+  the second one" approves something the user was never shown;
+* `wait`, `hold on` and `hang on` joined `NEGATIVE`. They already came out as
+  refusals by falling through to "not understood", which reached the same place
+  while telling the user the wrong reason.
+
+Only the refusal side moved. Widening the affirmative set is the change that
+could hurt, and it stayed exactly as it was: nine plain yeses are covered by a
+test whose whole job is to fail if tightening the refusals cost a user the
+ability to agree.
+
+The end-to-end test matters more than the unit one here. A false yes is only
+dangerous because something runs on it, so the test puts a `SpokenConfirmer` in
+front of a real `rm` through the real interceptor and asserts the file is still
+there. All three transcripts reached the shell before the fix.
+
+Cleaned up alongside: `except (NoSpeechDetected, Exception)` in
+`SpokenConfirmer`. `NoSpeechDetected` is a `VictorError` and therefore already an
+`Exception`, so naming it implied a distinction that does not exist. The breadth
+is deliberate and now says so — whatever the microphone did, the answer is to ask
+in writing rather than to guess — and `KeyboardInterrupt` still gets out.
+
+**810 tests.**

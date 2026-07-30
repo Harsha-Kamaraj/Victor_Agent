@@ -283,6 +283,45 @@ def test_ambiguous_answers_are_not_a_yes(answer: str) -> None:
     assert interpret(answer) is None
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "ok stop",  # a word from this module's own NEGATIVE set
+        "yeah no",
+        "yes no wait",
+        "ok wait",
+        "sure but not that one",
+        "wait",
+        "hold on",
+        "hang on",
+        "not now",
+    ],
+)
+def test_a_refusal_anywhere_in_the_answer_is_a_refusal(answer: str) -> None:
+    """Only the first word used to be read, so **"ok stop" returned True**.
+
+    Out loud, this is how people correct themselves - the interruption arrives
+    after the filler, and the interruption is the part that matters. Every one of
+    these approved the action being refused.
+    """
+    assert interpret(answer) is not True
+
+
+def test_a_qualified_yes_is_not_consent_to_what_was_asked() -> None:
+    """"yes but skip the second one" approves something the user was never
+    shown. Not understood is the honest answer, and callers treat it as no."""
+    assert interpret("yes but skip the second one") is None
+    assert interpret("yes, except the config file") is None
+
+
+@pytest.mark.parametrize(
+    "answer", ["yes", "yeah", "y", "ok", "okay", "sure", "yes, please", "yes, go ahead", "do it"]
+)
+def test_tightening_the_refusals_did_not_break_a_plain_yes(answer: str) -> None:
+    """The cost of reading the whole answer must not be a user who cannot agree."""
+    assert interpret(answer) is True
+
+
 def test_typed_confirmer_refuses_without_a_terminal() -> None:
     """Piped stdin cannot answer, so the answer is no."""
     confirmer = TypedConfirmer(stream=io.StringIO("yes\n"), output=io.StringIO())
@@ -339,6 +378,35 @@ def test_spoken_confirmation_accepts_a_no() -> None:
     request = ConfirmRequest("shell", "rm x", Classification(Risk.CONFIRM, "deletes"))
 
     assert confirmer.confirm(request) is False
+
+
+@pytest.mark.parametrize("heard", ["ok stop", "yeah no", "ok wait"])
+def test_a_spoken_correction_stops_the_delete_it_interrupts(
+    tmp_path: Path, heard: str
+) -> None:
+    """The whole way through the gate, not just `interpret` in isolation.
+
+    A false yes only matters because something runs on the strength of it, and
+    this is the arrangement in which it would: `victor converse` with a spoken
+    confirmer in front of a real delete. Every one of these transcripts used to
+    reach the shell.
+    """
+    pytest.importorskip("numpy")
+    from victor.safety.trash import Trash
+
+    doomed = tmp_path / "build.log"
+    doomed.write_text("x" * 100, encoding="utf-8")
+
+    confirmer = SpokenConfirmer(FakePipeline(heard), fallback=DenyingConfirmer())
+    gate = interceptor(
+        confirmer=confirmer, trash=Trash(tmp_path / "trash", "s1"), cwd=tmp_path
+    )
+    tool = ShellTool(cwd=tmp_path, trash=Trash(tmp_path / "trash", "s1"))
+
+    review = gate.review(tool.spec, {"command": "rm build.log"})
+
+    assert review.decision is Decision.DENY, f"{heard!r} approved the delete"
+    assert doomed.exists(), f"{heard!r} let the file be deleted"
 
 
 def test_spoken_confirmation_reasks_then_falls_back() -> None:

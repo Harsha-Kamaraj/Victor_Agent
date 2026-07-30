@@ -24,10 +24,20 @@ AFFIRMATIVE = frozenset(
      "okay", "affirmative", "sure", "run it", "y"}
 )
 
+#: Any of these anywhere in an answer makes it a refusal. "wait" and "hold on"
+#: are in here because they are how a person interrupts out loud, and neither is
+#: consent - previously they fell through to "not understood", which came to the
+#: same thing but told the user the wrong reason.
 NEGATIVE = frozenset(
-    {"no", "nope", "nah", "stop", "cancel", "don't", "dont", "do not", "negative", "abort",
-     "never mind", "nevermind", "n"}
+    {"no", "nope", "nah", "not", "stop", "cancel", "don't", "dont", "do not", "negative",
+     "abort", "never mind", "nevermind", "n", "wait", "hold on", "hang on"}
 )
+
+#: Words that turn an approval into approval of something else. "yes but not the
+#: second one" is not consent to what the user was shown, so it is not a yes.
+QUALIFIERS = frozenset({"but", "except", "unless", "although", "however"})
+
+_NEGATIVE_PHRASES = tuple(phrase for phrase in NEGATIVE if " " in phrase)
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,14 +103,37 @@ def interpret(answer: str) -> bool | None:
     if cleaned in NEGATIVE:
         return False
 
-    # Allow a leading answer in a longer sentence: "yes, go ahead".
-    first = cleaned.replace(",", " ").split()
-    if first:
-        if first[0] in AFFIRMATIVE:
-            return True
-        if first[0] in NEGATIVE:
-            return False
+    tokens = cleaned.replace(",", " ").split()
+
+    # A refusal anywhere in the answer settles it, whatever came first. Only the
+    # leading word used to be examined, so **"ok stop" returned True** - a word
+    # from this module's own NEGATIVE set, in an answer that approved the delete
+    # the user was interrupting. "yeah no" and "yes no wait" went the same way.
+    # Out loud these are how people correct themselves mid-sentence, and the
+    # correction is the part that matters.
+    if _refuses(cleaned, tokens):
+        return False
+
+    # A qualified yes approves something other than what was described, so it is
+    # not an answer to the question that was asked.
+    if any(token in QUALIFIERS for token in tokens):
+        return None
+
+    # A leading answer in a longer sentence: "yes, go ahead".
+    if tokens and tokens[0] in AFFIRMATIVE:
+        return True
     return None
+
+
+def _refuses(cleaned: str, tokens: list[str]) -> bool:
+    """Whether a refusal appears anywhere in the answer."""
+    if any(token in NEGATIVE for token in tokens):
+        return True
+    # Padded so a multi-word phrase matches on word boundaries: without it
+    # "do not" is a substring of "do nothing", which is a refusal too but not
+    # for the reason this would be claiming.
+    padded = f" {cleaned} "
+    return any(f" {phrase} " in padded for phrase in _NEGATIVE_PHRASES)
 
 
 class AutoConfirmer:
@@ -172,14 +205,19 @@ class SpokenConfirmer:
         self._attempts = attempts
 
     def confirm(self, request: ConfirmRequest) -> bool:
-        from ..voice import ListenMode, NoSpeechDetected
+        from ..voice import ListenMode
 
         self._pipeline.speak(request.spoken())
 
         for attempt in range(self._attempts):
             try:
                 turn = self._pipeline.listen(ListenMode.VAD)
-            except (NoSpeechDetected, Exception):
+            except Exception:
+                # Deliberately everything: whatever went wrong with the
+                # microphone, the answer is to ask in writing rather than to
+                # guess. `NoSpeechDetected` is a VictorError and so already an
+                # Exception - naming it alongside implied otherwise. Ctrl-C is a
+                # BaseException and still gets out.
                 break
 
             verdict = interpret(turn.text)
