@@ -1410,3 +1410,127 @@ reports **16 passed, 0 failed, 0 skipped**. What is left is not code:
   since the fixes landed. The screen-capture region fix in particular changes
   the `mss` path, which is the Windows backend, and has only been exercised
   against a stub.
+
+---
+
+## Windows, second pass *(added after P8)*
+
+Gagan re-ran the suite and the gates on Windows 11 at `5adb2bc`. Two real
+defects, one already-fixed report, and two limits to write down. His diagnoses
+were right on all of it; verified against the code before anything changed.
+
+### The executable-click rule had never fired on Windows
+
+This is the finding worth the whole exercise, and it is worse than a bug: it is
+a rule that reads correctly, is fully tested, is *documented as protection*, and
+does nothing on the platform it was written for.
+
+Windows sets `HideFileExt = 1` on a stock install. Explorer's accessibility name
+for `setup.exe` is therefore `setup`. The extension is gone before Victor sees
+it, so the classifier — which reads the label — was asked to grade `setup` and
+answered SAFE, correctly, for the wrong string. Measured on his machine:
+
+```
+Labels Explorer actually supplies      Labels the rule was tested with
+  setup    -> SAFE                       setup.exe   -> CONFIRM
+  install  -> SAFE                       install.bat -> CONFIRM
+```
+
+Every test for this rule passed a label with an extension. Not one of them
+passed a label Windows would produce. The tests were not wrong about the rule;
+they were wrong about the input, which is a harder mistake to see and the reason
+this needed someone on the actual platform.
+
+**Why the obvious fix is not enough.** The first instinct is to show the real
+filename in `screen_read`, so the model passes `setup.exe` and the existing rule
+fires. That helps, but it cannot be relied on: label re-verification matches
+substrings in *both* directions, deliberately, because real labels gain and lose
+decoration between reads. So `setup` satisfies `setup.exe` and sails through the
+one check that exists to catch a wrong index. The safety layer cannot depend on
+the model passing the fuller string.
+
+So the filename has to reach the classifier independently of the model. Three
+parts:
+
+**`Element.filename`** recovers the whole name from the value or the automation
+id when the display name has been stripped. It requires the candidate's stem to
+match the display name, which is what stops an Edit box's contents — a `value`
+of `report.docx` in a field named "Search" — from being read as a filename.
+
+**`ToolRegistry.run` gained an optional `describe()` hook.** A tool may add what
+it knows *for the verdict only*; it still runs on exactly the arguments the
+model sent. `ClickTool.describe` resolves the index against the cached tree — no
+refresh, so it costs nothing and cannot disagree with what the click resolves to
+a moment later — and supplies the filename, the control type and the process.
+This is the seam `tools/base.py` was built for, used for the first time.
+
+**And when there is no filename to be had, a file-manager list item confirms.**
+If UIA carries nothing with an extension, Victor cannot tell a document from a
+program, and activating the item runs whichever it is. "Probably a document" is
+not a safety argument. The cost of asking is one prompt; the cost of guessing
+wrong is an unknown binary. Both halves of the condition are required — a
+`ListItem` in a mail client is a message, and confirming every one of those
+would teach people to say yes without reading, which costs more safety than it
+buys. Supplying the filename returns the whole thing to the behaviour agreed
+with Gagan last round, where a `.txt` click stays silent.
+
+Re-verification is tightened for this one case too: a label without an extension
+no longer satisfies a file that has an executable one, and the refusal says how
+to proceed on purpose rather than just refusing.
+
+**Still unverified on Windows:** which UIA property actually carries the full
+name on real Explorer. The code tries value and automation id and falls back to
+the confirm-anyway rule, so it is safe either way — but whether it lands on the
+precise rule or the conservative one is his to confirm.
+
+### Two selftest gates could not clean up on Windows
+
+The P6 and P8 gates each built something inside a `TemporaryDirectory` and left
+it open — a SQLite store, a trace file. POSIX allows unlinking an open file;
+Windows raises `WinError 32`. Both gates passed every assertion and then died in
+cleanup, on Windows only, and one had started failing `pytest` there while
+staying green here.
+
+Both now close before the directory goes away, in a `finally` and via
+`closing()` respectively. The `finally` matters as much as the close: every
+early `return Status.FAIL` in those gates is inside the directory too.
+
+**The test asserts that `close()` is called, not that cleanup succeeded.**
+Cleanup succeeds on macOS whatever the code does, so a test written the obvious
+way would pass here forever while the bug stayed live on Windows. Gagan's note —
+*"a test that passes for you is exactly the failure mode here"* — is the whole
+design of that test. Verified by reverting the fix and watching it go red.
+
+### One report was already fixed
+
+Item 3, the P0 routing gate reporting FAIL when no keys are set, was fixed in
+`9a8a8f1` — he tested `5adb2bc`, one commit earlier. Nothing to do, and worth
+recording so it is not re-litigated. It was found the same way, writing CI.
+
+### Two limits, documented rather than fixed
+
+**`--app` resolves windows, not tabs.** Windows 11 Notepad is one window hosting
+tabbed documents, so targeting it acts on whatever tab is active. Gagan hit this
+with a scratch file whose sibling tab held a Google credentials file — and the
+focus-verification fix from the first pass caught it, refused, and said why.
+That is the single best piece of evidence in either report that the fix was
+worth making: the pre-fix code would have typed into the credentials file.
+
+**Explorer saturates `MAX_ELEMENTS = 200`.** The Pane climb works — the header
+now reads `Downloads - File Explorer (explorer.exe)` with the full toolbar
+visible, up from 147 elements stopping at `Items View` — but the cap binds
+before the tree ends, so every Explorer read reports as truncated. Breadth-first
+ordering puts the toolbar in the first 40 entries, so what the agent acts on
+survives. A tuning question, and now a stated limit.
+
+### Confirmed working on real Windows
+
+Recorded so they are not re-litigated: the Pane climb (200 elements, full
+toolbar), focus verification including the refusal path, modifier release for
+four chords *and* the exception-mid-chord case that was the original bug — all
+checked against `GetAsyncKeyState` rather than against Victor's own report — and
+the capture region convention against real `mss` at four offsets, including the
+non-origin cases the original bug needed and no test covered. Memory works
+offline on Windows. **Zero API requests across his entire session.**
+
+**758 tests.**
