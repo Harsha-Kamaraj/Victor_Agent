@@ -92,6 +92,38 @@ def _map_role(role: str) -> str:
     return role.removeprefix("AX") or "Unknown"
 
 
+#: Processes that can be "frontmost" without being an application anyone is
+#: looking at. Stage Manager (``WindowManager``) is the one that matters: it
+#: takes front whenever focus lands on the desktop, and it owns no accessible
+#: windows, so targeting it makes every read fail.
+NOT_AN_APP = frozenset(
+    {
+        "windowmanager",
+        "window server",
+        "dock",
+        "spotlight",
+        "systemuiserver",
+        "loginwindow",
+        "control centre",
+        "control center",
+        "notification centre",
+        "notification center",
+    }
+)
+
+
+def _plain(name: object) -> str:
+    """Fold a process name for comparison.
+
+    macOS prefixes some application names with a left-to-right mark - WhatsApp
+    reports as ``'\\u200eWhatsApp'`` - so a plain equality test against a name a
+    person typed silently fails.
+    """
+    text = str(name or "")
+    kept = [ch for ch in text if ch == " " or (ch.isprintable() and not ch.isspace())]
+    return "".join(kept).strip().lower()
+
+
 @dataclass(frozen=True, slots=True)
 class _Frameworks:
     """The PyObjC symbols this backend needs, resolved once."""
@@ -219,12 +251,64 @@ class AXBackend:
     def _target_application(self, fw: _Frameworks) -> Any | None:
         workspace = fw.workspace.sharedWorkspace()
         if self.app_name is None:
-            return workspace.frontmostApplication()
+            front = workspace.frontmostApplication()
+            if front is not None and _plain(front.localizedName()) not in NOT_AN_APP:
+                return front
+            # Stage Manager owns no accessible windows, so leaving it as the
+            # target made every screen_read fail. Fall through to the topmost
+            # application that actually has one.
+            return self._topmost_windowed_application(fw) or front
 
-        wanted = self.app_name.strip().lower()
+        wanted = _plain(self.app_name)
         for app in workspace.runningApplications():
-            name = app.localizedName() or ""
-            if name.lower() == wanted or wanted in name.lower():
+            name = _plain(app.localizedName())
+            if name == wanted or wanted in name:
+                return app
+        return None
+
+    def _topmost_windowed_application(self, fw: _Frameworks) -> Any | None:
+        """The frontmost app that actually owns a window.
+
+        ``frontmostApplication()`` answers with whatever holds focus, and that
+        is sometimes a helper with no windows at all. Stage Manager takes front
+        the moment focus lands on the desktop, so on a machine with it enabled
+        every read failed with *"WindowManager has no accessible windows"* - and
+        the ordinary way to reach the desktop is to click away from a window,
+        which is exactly what a user does before talking to Victor.
+
+        Quartz lists on-screen windows in true front-to-back order, so the first
+        ordinary-layer window with a real owner is the one being looked at.
+        Layer 0 is what excludes the menu bar, the dock and Stage Manager's own
+        overlays, which sit in layers of their own.
+        """
+        try:
+            import Quartz
+        except ImportError:  # pragma: no cover - pyobjc is an optional extra
+            return None
+
+        try:
+            windows = (
+                Quartz.CGWindowListCopyWindowInfo(
+                    Quartz.kCGWindowListOptionOnScreenOnly
+                    | Quartz.kCGWindowListExcludeDesktopElements,
+                    Quartz.kCGNullWindowID,
+                )
+                or []
+            )
+        except Exception:  # pragma: no cover - defensive around a C API
+            return None
+
+        by_pid = {
+            app.processIdentifier(): app
+            for app in fw.workspace.sharedWorkspace().runningApplications()
+        }
+        for window in windows:
+            if window.get("kCGWindowLayer") != 0:
+                continue
+            if _plain(window.get("kCGWindowOwnerName")) in NOT_AN_APP:
+                continue
+            app = by_pid.get(window.get("kCGWindowOwnerPID"))
+            if app is not None:
                 return app
         return None
 

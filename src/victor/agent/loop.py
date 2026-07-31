@@ -36,6 +36,14 @@ from .prompts import system_prompt
 DEFAULT_MAX_STEPS = 8
 DEFAULT_TOKEN_BUDGET = 20_000
 
+DEFAULT_HISTORY_BUDGET = 12_000
+"""Characters of conversation carried between turns of a session.
+
+Roughly 3,000 tokens. Free tiers meter tokens *per minute* - 6,000 on the
+smallest Groq model - so an unbounded history stops the session on a limit
+the user never spent anything to reach.
+"""
+
 
 class Outcome(StrEnum):
     ANSWERED = "answered"
@@ -139,6 +147,7 @@ class Agent:
         cwd: Path | None = None,
         max_steps: int = DEFAULT_MAX_STEPS,
         token_budget: int = DEFAULT_TOKEN_BUDGET,
+        history_budget: int = DEFAULT_HISTORY_BUDGET,
         voice: bool = False,
         on_step: Callable[[Step], None] | None = None,
         kill_switch: Any | None = None,
@@ -152,6 +161,7 @@ class Agent:
         self.cwd = Path(cwd or Path.cwd())
         self.max_steps = max_steps
         self.token_budget = token_budget
+        self.history_budget = history_budget
         self.voice = voice
         self.on_step = on_step
         self.kill_switch = kill_switch
@@ -192,6 +202,7 @@ class Agent:
         """
         if not self.messages:
             self.reset()
+        self._forget_old_turns()
         self.messages.append({"role": "user", "content": task})
 
         result = AgentResult(task=task, answer="", outcome=Outcome.FAILED)
@@ -272,6 +283,36 @@ class Agent:
             tokens=result.total_tokens,
         )
         return result
+
+    def _forget_old_turns(self) -> None:
+        """Keep the conversation, but stop it growing without limit.
+
+        ``converse`` reuses one agent so a follow-up can say "and the other
+        one", which is worth having. But nothing dropped anything, and a desktop
+        turn appends a whole accessibility tree - so five turns reached 9,000
+        tokens and the run died on tokens-per-minute rather than on anything the
+        user asked for:
+
+            no provider available for text:
+              groq:llama-3.1-8b-instant: rate limited (5744/6000 tok/min)
+
+        Trimming from the front keeps the system prompt, which carries the tool
+        rules, and keeps the most recent exchanges, which is where a pronoun
+        points. A tool result is dropped with the assistant turn that requested
+        it, because a tool message whose call is gone is a protocol error at
+        every provider.
+        """
+        budget = self.history_budget
+        if budget <= 0 or len(self.messages) < 2:
+            return
+
+        head, rest = self.messages[:1], self.messages[1:]
+        while rest and sum(len(str(m.get("content") or "")) for m in rest) > budget:
+            del rest[0]
+            # Never leave a tool result orphaned by the call it answers.
+            while rest and rest[0].get("role") == "tool":
+                del rest[0]
+        self.messages = head + rest
 
     # -- tools -------------------------------------------------------------
 

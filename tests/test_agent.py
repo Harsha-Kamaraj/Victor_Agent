@@ -463,3 +463,48 @@ def test_a_run_is_traced_end_to_end(settings: Settings, tmp_path: Path) -> None:
     assert "tool.run" in kinds
     assert "agent.run" in kinds
     assert "agent.answer" in kinds
+
+
+def test_a_long_session_does_not_grow_without_limit(settings: Settings) -> None:
+    """Free tiers meter tokens per *minute*, so history is a rate limit.
+
+    `converse` reuses one agent so a follow-up can say "the other one", and
+    nothing ever dropped anything. A desktop turn appends a whole accessibility
+    tree, so five turns reached 9,000 tokens and the session died on
+    "rate limited (5744/6000 tok/min)" - a limit the user never spent anything
+    to reach.
+    """
+    from victor.agent.loop import Agent
+
+    agent = Agent.__new__(Agent)
+    agent.history_budget = 500
+    agent.messages = [{"role": "system", "content": "SYSTEM PROMPT"}]
+    for turn in range(20):
+        agent.messages.append({"role": "user", "content": f"turn {turn}"})
+        agent.messages.append({"role": "assistant", "content": "x" * 200})
+
+    agent._forget_old_turns()
+
+    body = sum(len(str(m["content"])) for m in agent.messages[1:])
+    assert body <= 500, f"history kept {body} characters"
+    assert agent.messages[0]["content"] == "SYSTEM PROMPT", "the tool rules were dropped"
+    assert agent.messages[-1]["content"] == "x" * 200, "the newest turn was dropped"
+
+
+def test_trimming_never_orphans_a_tool_result(settings: Settings) -> None:
+    """A tool message whose originating call has been dropped is a protocol
+    error at every provider, so the pair has to go together."""
+    from victor.agent.loop import Agent
+
+    agent = Agent.__new__(Agent)
+    agent.history_budget = 120
+    agent.messages = [
+        {"role": "system", "content": "S"},
+        {"role": "assistant", "content": "a" * 100},
+        {"role": "tool", "content": "t" * 100},
+        {"role": "assistant", "content": "b" * 100},
+    ]
+
+    agent._forget_old_turns()
+
+    assert agent.messages[1]["role"] != "tool", "a tool result outlived its call"

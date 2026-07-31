@@ -1926,3 +1926,57 @@ these survived a green suite because no test ran the desktop tools *as a user
 would*: with a flag on, in a real app, from a terminal that had focus.
 
 **833 tests.**
+
+## Stage Manager was the frontmost application *(added after P8)*
+
+The first `converse --desktop` run failed on every read:
+
+```
+fail screen_read(filter='Harsha', limit=20)
+     WindowManager has no accessible windows. Focus an application window, or pass --app to name one.
+```
+
+`WindowManager` is Stage Manager. It takes front whenever focus lands on the
+desktop, and it owns no accessible windows - so `frontmostApplication()` returned
+it and every read failed. The ordinary way to reach the desktop is to click away
+from a window, which is exactly what someone does before turning to talk to
+Victor. On a machine with Stage Manager enabled, the desktop tools could not be
+used at all without `--app`.
+
+This module's own docstring called it: *"the literal frontmost process is
+sometimes a helper with no windows (WindowManager when nothing is focused)"*. It
+was written down and never acted on, which is its own lesson - a known
+limitation in a comment is not a handled one.
+
+Quartz lists on-screen windows in true front-to-back order, so the fallback takes
+the first ordinary-layer window whose owner is a real application. Layer 0 is what
+excludes the menu bar, the dock, and Stage Manager's own `App Icon Window` and
+`Gesture Blocking Overlay`, which are interleaved with the real windows in that
+list. Verified against a live desktop: the fallback picks WhatsApp past two
+WindowManager overlays.
+
+Name comparison had to be folded, too. macOS reports WhatsApp as
+`'‎WhatsApp'` - with a left-to-right mark - so `--app WhatsApp` was matching
+by substring and would never have matched by equality.
+
+### History is a rate limit
+
+The same session then died on something else:
+
+```
+no provider available for text:
+  groq:llama-3.1-8b-instant: rate limited (5744/6000 tok/min)
+```
+
+Nothing had been spent - `victor quota` showed the day's requests barely touched.
+Free tiers meter tokens *per minute*, and `converse` reuses one agent so a
+follow-up can say "the other one". Nothing ever dropped anything, and a desktop
+turn appends a whole accessibility tree, so five turns reached 9,000 tokens per
+request and the session stopped on a limit the user never asked for.
+
+History is now trimmed from the front against a character budget, always keeping
+the system prompt - it carries the tool rules - and always dropping a tool result
+together with the assistant turn that requested it, because a tool message whose
+call is gone is a protocol error at every provider.
+
+**835 tests.**
