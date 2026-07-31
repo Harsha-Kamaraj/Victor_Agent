@@ -36,6 +36,15 @@ from .prompts import system_prompt
 DEFAULT_MAX_STEPS = 8
 DEFAULT_TOKEN_BUDGET = 20_000
 
+TOKENS_PER_STEP = 4_000
+"""What one think-act cycle costs, near enough, once history is trimmed.
+
+Every step re-sends the conversation, so a run's total is roughly this times the
+number of steps. A flat token budget therefore contradicts ``--steps``: at 20,000
+a fifteen-step run stopped itself around step six, having done the work and then
+reported "used more than its token budget" instead of the answer.
+"""
+
 DEFAULT_HISTORY_BUDGET = 12_000
 """Characters of conversation carried between turns of a session.
 
@@ -575,6 +584,11 @@ def build_agent(
         trace=trace,
         cwd=workdir,
         max_steps=max_steps,
+        # Derived, so the two limits cannot contradict each other. The budget
+        # exists to stop a runaway loop, and with history trimmed the cost of a
+        # step is bounded - so the honest ceiling is "the steps you asked for",
+        # not a constant that silently overrules them.
+        token_budget=max(DEFAULT_TOKEN_BUDGET, max_steps * TOKENS_PER_STEP),
         voice=voice,
         kill_switch=kill_switch,
         memory=memory,

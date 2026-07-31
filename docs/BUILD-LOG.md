@@ -2025,3 +2025,54 @@ called "Visual Studio Code"; the point is catching a completely different
 application, not policing spelling.
 
 **837 tests.**
+
+## Sent, unconfirmed, and then reported as over budget *(added after P8)*
+
+The voice-to-desktop chain finally ran whole:
+
+```
+ok open_app(name='WhatsApp')                         → 50 elements
+ok click(index=25, label='Harsha💕')                  → pressed
+ok type_text(into=13, label='Compose message', submit=True, text='hello from Victor')
+   set 'Compose message' to 'hello from Victor' and pressed return
+ok screen_read()                                     → 41 → 42 elements
+```
+
+Voice, transcription, model, accessibility tree, click, type, send. The element
+count rising by one is the message bubble arriving.
+
+Two things wrong with it, both found by the person using it rather than by any
+test here.
+
+**It never asked.** `classify` had this, verbatim:
+
+```python
+# Typing is reversible - select all, delete - and the thing that makes
+# it consequential is the button pressed afterwards, which arrives here
+# as its own call. Submitting is the exception: return is the button.
+if arguments.get("submit"):
+    return Classification(Risk.SAFE, "types and presses return, ...")
+```
+
+The comment states the rule and the code does the opposite. Because `submit=True`
+types *and* presses return in one call, `classify_click` - which does know that
+Send cannot be taken back, and which had just been taught about calls - never saw
+a click to judge. So the message went out with no confirmation, in a session
+where confirmation had been proven working in both directions an hour earlier.
+Typing stays free; committing it now needs a yes.
+
+That is twice in two days that the right analysis was sitting in a comment above
+code that did not do it - the other being *"the literal frontmost process is
+sometimes a helper with no windows"*. Worth naming as a pattern: **a limitation
+written down is not a limitation handled**, and the comment makes it *less*
+likely anyone notices, because reading it feels like reading a fix.
+
+**Then it reported a budget stop for work it had finished.** `DEFAULT_TOKEN_BUDGET`
+was a flat 20,000 whatever `--steps` said, and every step re-sends the
+conversation - so a fifteen-step run exhausts it around step six. The two limits
+contradicted each other, and `--steps 15` could never complete no matter what it
+was asked to do. The budget is now derived from the step count, which is honest
+in both directions: it still stops a runaway, at the point the user actually
+asked for. Short runs keep the same floor.
+
+**840 tests.**

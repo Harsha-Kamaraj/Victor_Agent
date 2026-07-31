@@ -555,8 +555,17 @@ def classify(tool_name: str, arguments: dict, *, mutating: bool) -> Classificati
         # it consequential is the button pressed afterwards, which arrives here
         # as its own call. Submitting is the exception: return is the button.
         if arguments.get("submit"):
+            # This said exactly that and then graded it SAFE. So a spoken run
+            # sent a WhatsApp message with no confirmation: one call typed the
+            # text *and* pressed return, and `classify_click` - which does know
+            # that Send cannot be taken back - never saw a click to judge.
+            # Typing stays free; committing it is the part that needs a yes.
+            label = str(arguments.get("label", "")).strip()
             return Classification(
-                Risk.SAFE, "types and presses return, which the target may act on"
+                Risk.CONFIRM,
+                f"presses return after typing{f' into {label!r}' if label else ''}, "
+                "which sends or submits it",
+                label,
             )
         return Classification(Risk.SAFE, "types into a field")
     if tool_name in {"screen_read", "scroll"}:

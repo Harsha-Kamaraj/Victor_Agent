@@ -301,3 +301,22 @@ def test_navigating_an_app_stays_out_of_the_way(label: str) -> None:
     from victor.safety.classify import classify_click
 
     assert classify_click({"label": label, "index": 1}).risk is Risk.SAFE
+
+
+def test_typing_is_free_but_sending_is_confirmed() -> None:
+    """Return is the button, and the button is the part that acts.
+
+    `classify` said so in a comment and graded it SAFE anyway, so a spoken run
+    sent a WhatsApp message with no confirmation at all: one `type_text` call
+    typed the text *and* pressed return, which meant the click classifier - which
+    does know Send cannot be taken back - never saw a click to judge.
+    """
+    from victor.safety.classify import classify
+
+    typing = {"text": "hello from Victor", "into": 13, "label": "Compose message"}
+    assert classify("type_text", typing, mutating=True).risk is Risk.SAFE
+
+    sending = {**typing, "submit": True}
+    verdict = classify("type_text", sending, mutating=True)
+    assert verdict.risk is Risk.CONFIRM
+    assert "Compose message" in verdict.reason

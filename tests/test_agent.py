@@ -508,3 +508,34 @@ def test_trimming_never_orphans_a_tool_result(settings: Settings) -> None:
     agent._forget_old_turns()
 
     assert agent.messages[1]["role"] != "tool", "a tool result outlived its call"
+
+
+def test_the_token_budget_does_not_overrule_the_step_limit(settings: Settings) -> None:
+    """Asking for more steps has to actually buy more steps.
+
+    Every step re-sends the conversation, so a run's total tokens grow with the
+    step count. A flat 20,000 budget meant `--steps 15` stopped itself around
+    step six - after doing the work - and reported "used more than its token
+    budget" in place of the answer.
+    """
+    from victor.agent.loop import TOKENS_PER_STEP, build_agent
+
+    for steps in (8, 15, 30):
+        agent = build_agent(settings, max_steps=steps)
+        try:
+            assert agent.token_budget >= steps * TOKENS_PER_STEP, (
+                f"{steps} steps cannot complete inside a {agent.token_budget} budget"
+            )
+        finally:
+            agent.close()
+
+
+def test_a_small_step_count_keeps_the_ordinary_budget(settings: Settings) -> None:
+    """Scaling must not shrink the floor for short runs."""
+    from victor.agent.loop import DEFAULT_TOKEN_BUDGET, build_agent
+
+    agent = build_agent(settings, max_steps=2)
+    try:
+        assert agent.token_budget == DEFAULT_TOKEN_BUDGET
+    finally:
+        agent.close()
