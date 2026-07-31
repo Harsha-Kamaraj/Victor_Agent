@@ -36,7 +36,7 @@ from .prompts import system_prompt
 DEFAULT_MAX_STEPS = 8
 DEFAULT_TOKEN_BUDGET = 20_000
 
-TOKENS_PER_STEP = 4_000
+TOKENS_PER_STEP = 8_000
 """What one think-act cycle costs, near enough, once history is trimmed.
 
 Every step re-sends the conversation, so a run's total is roughly this times the
@@ -252,10 +252,16 @@ class Agent:
 
                 if result.total_tokens >= self.token_budget:
                     result.outcome = Outcome.TOKEN_LIMIT
+                    # Say what was done, the way the step limit does. Hitting
+                    # this after sending a message and then answering only
+                    # "used more than its token budget" tells the user their
+                    # task failed when it had in fact just succeeded - they
+                    # went looking for a bug that was not there.
+                    done = result.steps[-1].reply.content if result.steps else ""
                     result.answer = (
-                        "I stopped: this task used more than its token budget. "
-                        "Try asking for something narrower."
-                    )
+                        "I ran out of token budget. Here is what I did get done. "
+                        + done
+                    ).strip()
                     break
 
                 try:

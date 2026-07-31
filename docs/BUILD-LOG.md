@@ -2076,3 +2076,29 @@ in both directions: it still stops a runaway, at the point the user actually
 asked for. Short runs keep the same floor.
 
 **840 tests.**
+
+## The token limit again, and why restarting matters *(added after P8)*
+
+Reported again after the previous fix. Measured, the fix was in place and
+sufficient: `--steps 15` allowed 60,000 tokens against a measured cost of about
+2,600 per step, so roughly 39,000 for a full run. The likeliest explanation is
+that the session predated the fix - `converse` is long-lived, and a running
+process keeps the code it started with.
+
+Two changes anyway, because "it should have worked" is not evidence that it did.
+
+`TOKENS_PER_STEP` is now 8,000 rather than 4,000. Desktop steps are dearer than
+the runs those numbers came from: ten tool schemas ride on every request (5,647
+characters of JSON), plus a 2,360-character system prompt, plus up to 12,000
+characters of trimmed history. `max_steps` is the guard that should bind in
+ordinary use; the token budget is there for the pathological case, and it was
+sitting close enough to normal usage to fire on legitimate work.
+
+More importantly, hitting the budget no longer discards what was accomplished.
+It answered only *"I stopped: this task used more than its token budget"* - in a
+run that had already sent the message. The user was told their task failed
+immediately after it succeeded, and went looking for a bug that was not there.
+The step limit had always summarised what it managed; the token limit now does
+the same.
+
+**840 tests.**
