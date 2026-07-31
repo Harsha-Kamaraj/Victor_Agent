@@ -45,6 +45,21 @@ the user never spent anything to reach.
 """
 
 
+def _history_size(messages: list[dict[str, Any]]) -> int:
+    return sum(len(str(message.get("content") or "")) for message in messages)
+
+
+def _drop_oldest(messages: list[dict[str, Any]]) -> None:
+    """Remove the front message, and any tool result it stranded.
+
+    A tool message whose originating assistant call is gone is a protocol error
+    at every provider, so the pair leaves together.
+    """
+    del messages[0]
+    while messages and messages[0].get("role") == "tool":
+        del messages[0]
+
+
 class Outcome(StrEnum):
     ANSWERED = "answered"
     STEP_LIMIT = "step-limit"
@@ -203,7 +218,8 @@ class Agent:
         if not self.messages:
             self.reset()
         self._forget_old_turns()
-        self.messages.append({"role": "user", "content": task})
+        instruction: dict[str, Any] = {"role": "user", "content": task}
+        self.messages.append(instruction)
 
         result = AgentResult(task=task, answer="", outcome=Outcome.FAILED)
         started = time.perf_counter()
@@ -216,6 +232,14 @@ class Agent:
                     result.outcome = Outcome.ABORTED
                     result.answer = "Stopped."
                     break
+
+                # Inside the loop, not only between turns. A desktop task reads
+                # the screen at almost every step, and each tree is thousands of
+                # characters, so one run with --steps 15 blows a 6,000
+                # tokens-per-minute allowance on its own - the first attempt at
+                # this trimmed only at the start of a turn and still died in
+                # step 8 of turn 1.
+                self._forget_old_turns(pin=instruction)
 
                 if result.total_tokens >= self.token_budget:
                     result.outcome = Outcome.TOKEN_LIMIT
@@ -284,7 +308,7 @@ class Agent:
         )
         return result
 
-    def _forget_old_turns(self) -> None:
+    def _forget_old_turns(self, pin: dict[str, Any] | None = None) -> None:
         """Keep the conversation, but stop it growing without limit.
 
         ``converse`` reuses one agent so a follow-up can say "and the other
@@ -306,13 +330,25 @@ class Agent:
         if budget <= 0 or len(self.messages) < 2:
             return
 
-        head, rest = self.messages[:1], self.messages[1:]
-        while rest and sum(len(str(m.get("content") or "")) for m in rest) > budget:
-            del rest[0]
-            # Never leave a tool result orphaned by the call it answers.
-            while rest and rest[0].get("role") == "tool":
-                del rest[0]
-        self.messages = head + rest
+        system, rest = self.messages[:1], self.messages[1:]
+        start = next((i for i, m in enumerate(rest) if m is pin), 0) if pin is not None else 0
+        before, current = rest[:start], rest[start:]
+
+        # Whole earlier turns go first - they are the least likely to be needed.
+        while before and _history_size(before + current) > budget:
+            _drop_oldest(before)
+
+        # Still over budget means this one task has outgrown it, which a desktop
+        # run does easily. Trim inside it, but never the instruction itself:
+        # dropping that leaves the model working without knowing what it was
+        # asked, which is worse than any amount of forgotten screen.
+        if len(current) > 1 and _history_size(current) > budget:
+            task, tail = current[:1], current[1:]
+            while tail and _history_size(task + tail) > budget:
+                _drop_oldest(tail)
+            current = task + tail
+
+        self.messages = system + before + current
 
     # -- tools -------------------------------------------------------------
 

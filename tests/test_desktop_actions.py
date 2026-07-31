@@ -616,10 +616,37 @@ def test_open_app_takes_a_name_not_a_command_line(name):
 
 
 def test_open_app_accepts_real_application_names():
+    """The point is the name regex: these are names, not command lines.
+
+    Asserting that rather than `.ok`, because whether the right window ends up
+    in front is a different question, checked below with a fake that can answer
+    it - this one always reports the same process whatever it was asked for.
+    """
     tools, actuator = tools_over("x")
     for name in ("Chrome", "File Explorer", "Visual Studio Code", "Notes"):
-        assert tools["open_app"].run(name=name).ok
+        result = tools["open_app"].run(name=name)
+        assert "plain application name" not in (result.error or "")
     assert len(actuator.calls) == 4
+
+
+def test_open_app_says_when_a_different_window_is_in_front():
+    """`open_app('Messages')` reported "brought it forward" while the tree being
+    read belonged to VS Code: the app was activated but owns no window, so the
+    reader fell through to the topmost windowed application. Reported as plain
+    success, it sent the model hunting for a WhatsApp chat inside an editor,
+    and it spent every remaining step there."""
+    tools, _ = tools_over("x", process="Code")
+
+    result = tools["open_app"].run(name="WhatsApp")
+
+    assert result.ok is False
+    assert "Code" in (result.error or "")
+    assert result.metadata["showing"] == "Code"
+
+
+def test_open_app_is_quiet_when_the_right_app_arrives():
+    tools, _ = tools_over("x", process="WhatsApp")
+    assert tools["open_app"].run(name="WhatsApp").ok
 
 
 @pytest.mark.parametrize(

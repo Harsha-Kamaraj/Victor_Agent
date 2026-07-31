@@ -64,6 +64,21 @@ TERMINAL_APPS = frozenset(
 _APP_NAME = re.compile(r"^[\w .+&'-]{1,64}$")
 
 
+def _same_app(showing: str, wanted: str) -> str | bool:
+    """Whether a window's owner is the application that was asked for.
+
+    Forgiving on purpose: macOS decorates names with bidi marks, and a process
+    can report "Code" for an app called "Visual Studio Code". Either name
+    containing the other is enough - the point is to catch a completely
+    different application, not to police spelling.
+    """
+    left = "".join(ch for ch in showing.lower() if ch.isalnum())
+    right = "".join(ch for ch in wanted.lower() if ch.isalnum())
+    if not left or not right:
+        return True
+    return left in right or right in left
+
+
 def looks_like_terminal(window_title: str, process: str) -> bool:
     """Is the agent about to type into a shell?
 
@@ -527,7 +542,37 @@ class FocusAppTool(_DesktopTool):
                 ),
             )
         action = self.desktop.open_app if launch else self.desktop.focus_app
-        return self._guard(action, cleaned)
+        result = self._guard(action, cleaned)
+        if not result.ok:
+            return result
+
+        # Say so when the window in front is not the one that was asked for.
+        # `open_app('Messages')` reported "brought it forward" while the tree
+        # being read belonged to VS Code - the app had been activated but owns
+        # no window, so the reader fell through to the topmost windowed app.
+        # Reporting that as plain success sent the model looking for a WhatsApp
+        # chat in an editor, and it spent every remaining step there.
+        showing = self._window_owner()
+        if showing and not _same_app(showing, cleaned):
+            return ToolResult(
+                ok=False,
+                error=(
+                    f"asked for {cleaned!r} but the window in front is {showing!r}. "
+                    f"{cleaned!r} may have no open window. Open one, or work with "
+                    f"{showing!r}, or name a different application."
+                ),
+                output=result.output,
+                metadata={**result.metadata, "showing": showing},
+            )
+        return result
+
+    def _window_owner(self) -> str:
+        """Which application the readable window actually belongs to."""
+        try:
+            snapshot = self.desktop.snapshot(refresh=True)
+        except (PerceptionUnavailable, ActuationUnavailable):
+            return ""
+        return str(snapshot.process or "")
 
 
 def build_desktop_tools(

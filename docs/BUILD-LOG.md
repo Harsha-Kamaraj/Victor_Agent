@@ -1980,3 +1980,48 @@ together with the assistant turn that requested it, because a tool message whose
 call is gone is a protocol error at every provider.
 
 **835 tests.**
+
+## Two more, from the second desktop run *(added after P8)*
+
+**The rate limit was inside one run, not across turns.** The previous fix trimmed
+history between turns, and the next session died in step 8 of turn *one*:
+
+```
+I could not reach a model: every text model is rate limited
+```
+
+A desktop task reads the screen at nearly every step, and each tree is thousands
+of characters, so `--steps 15` blows a 6,000 tokens-per-minute allowance on its
+own. Trimming now runs inside the loop as well - measured, a 15-step desktop run
+goes from 62,085 characters of history to 10,033.
+
+Trimming mid-run needed one more rule than trimming between turns: the
+instruction is pinned. Dropping the oldest message is fine when the oldest is a
+previous turn, and catastrophic when it is *what the user just asked for* -
+the model would carry on clicking with no idea why. So earlier turns go first,
+and only if the current task alone still exceeds the budget is anything dropped
+within it, never the instruction.
+
+**`open_app` reported success for the wrong application.** The run shows
+
+```
+ok open_app(launch=True, name='Messages')
+   Messages was already running; brought it forward
+   Now showing: Build Victor Agent voice… — Victor_Agent
+```
+
+Messages *was* activated. It owns no window, so the reader fell through to the
+topmost windowed application, which was VS Code - and the tool reported plain
+success. The model then spent every remaining step hunting for a WhatsApp chat
+inside an editor, which is exactly what the transcript shows: `press_keys mod+f`,
+`screen_read(filter='Search for a friend or group')`, nothing found, repeat.
+
+That fall-through is the Stage Manager fix from the previous entry, and it is
+right - but silently substituting a different application is not the same thing
+as reporting which one you got. `open_app` now compares the window that arrived
+against the name it was given and fails when they differ, naming both. The
+comparison is deliberately forgiving, since a process reports "Code" for an app
+called "Visual Studio Code"; the point is catching a completely different
+application, not policing spelling.
+
+**837 tests.**
